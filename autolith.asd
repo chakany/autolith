@@ -65,6 +65,7 @@
                              (:file "mcp-tools")
                              (:file "memory-tools")
                              (:file "agenda-tools")
+                             (:file "seatbelt")
                              (:file "workspace-tools")
                              (:file "search-tools")
                              (:file "search-worker")
