@@ -3399,11 +3399,113 @@
   nil)
 
 
+;;;; -- HTTP and Provider Compatibility --
+
+(-> test-mcp-http-repeated-response-session () null)
+(defun test-mcp-http-repeated-response-session ()
+  "Test repeated response session headers remain compatible with Python SDKs."
+  (let ((transport
+          (make-mcp-streamable-http-transport
+           "https://example.test/mcp")))
+    (test-assert
+     (null
+      (mcparen::mcp-http--stage-initialize-session-header
+       transport
+       "session-1"
+       :initialize-request-p t))
+     "an initialization response stages its session identifier")
+    (test-assert
+     (null
+      (mcparen::mcp-http--stage-initialize-session-header
+       transport
+       "session-1"
+       :request-session "session-1"))
+     "a repeated response session identifier is accepted")
+    (test-assert
+     (handler-case
+         (progn
+           (mcparen::mcp-http--stage-initialize-session-header
+            transport
+            "session-2"
+            :request-session "session-1")
+           nil)
+       (mcparen:mcp-protocol-error ()
+         t))
+     "a changed response session identifier remains a protocol error"))
+  nil)
+
+(-> test-mcp-provider-schema-json-fidelity () null)
+(defun test-mcp-provider-schema-json-fidelity ()
+  "Test MCP schemas retain distinct JSON false and null values."
+  (let* ((configuration (test-configuration))
+         (root          (test-configuration-root configuration)))
+    (unwind-protect
+         (multiple-value-bind (manager transport)
+             (test-mcp--manager configuration)
+           (declare (ignore transport))
+           (unwind-protect
+                (let* ((runtime
+                         (first (mcp-manager-runtimes manager)))
+                       (namespace-schema
+                         (json-object
+                          "anyOf"
+                          (vector
+                           (json-object "type" "string")
+                           (json-object "type" "null"))
+                          "default"
+                          (mcparen:json-null-value)))
+                       (source
+                         (json-object
+                          "type" "object"
+                          "additionalProperties" yason:false
+                          "properties"
+                          (json-object "namespace" namespace-schema))))
+                  (multiple-value-bind (projected bytes)
+                      (mcp-tools--provider-schema runtime source)
+                    (let* ((properties
+                             (json-get projected "properties"))
+                           (namespace
+                             (json-get properties "namespace"))
+                           (any-of
+                             (json-get namespace "anyOf"))
+                           (encoded
+                             (json-encode projected)))
+                      (test-assert
+                       (and (> bytes 0)
+                            (not (eq projected source))
+                            (not (eq namespace namespace-schema)))
+                       "provider projection returns a detached schema")
+                      (test-assert
+                       (eq
+                        (json-get projected "additionalProperties")
+                        yason:false)
+                       "provider projection preserves JSON false")
+                      (test-assert
+                       (and
+                        (vectorp any-of)
+                        (= (length any-of) 2)
+                        (eq
+                         (json-get namespace "default")
+                         (mcparen:json-null-value))
+                        (string= (json-get (aref any-of 1) "type") "null"))
+                       "provider projection preserves nullable schema values")
+                      (test-assert
+                       (and (search "\"additionalProperties\":false" encoded)
+                            (search "\"default\":null" encoded))
+                       "provider JSON distinguishes false from null"))))
+             (mcp-manager-close manager)))
+      (uiop:delete-directory-tree
+       root :validate t :if-does-not-exist :ignore)))
+  nil)
+
+
 ;;;; -- Integration Tests --
 
 (-> test-mcp-tools () null)
 (defun test-mcp-tools ()
   "Test MCP tool projection, authorization, resources, and lifecycle behavior."
+  (test-mcp-http-repeated-response-session)
+  (test-mcp-provider-schema-json-fidelity)
   (test-mcp-credential-stdio-ingress-projection)
   (test-mcp-environment-fingerprint-lifecycle)
   (test-mcp-cleanup-without-credential-availability)

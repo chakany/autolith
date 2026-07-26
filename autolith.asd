@@ -27,6 +27,7 @@
   :components ((:module "src"
                 :serial t
                 :components ((:file "package")
+                             (:file "mcp-http-session")
                              (:file "types")
                              (:file "conditions")
                              (:file "json")
