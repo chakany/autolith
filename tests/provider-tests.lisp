@@ -852,6 +852,40 @@
      "response.failed keeps its response identifier distinct")
     (test-assert (search "Temporary provider failure." (format nil "~A" condition))
                  "response.failed surfaces the provider's explanation"))
+  (let* ((source
+           (test-sse-event-string
+            (json-object
+             "type" "response.incomplete"
+             "response"
+             (json-object
+              "id" "incomplete-response"
+              "status" "incomplete"
+              "incomplete_details"
+              (json-object "reason" "max_output_tokens")))))
+         (condition
+           (handler-case
+               (progn
+                 (provider--consume-stream
+                  (make-instance 'model-provider)
+                  (make-instance 'test-character-input-stream :source source)
+                  nil
+                  #'identity)
+                 nil)
+             (provider-error (error)
+               error))))
+    (test-assert
+     (and (typep condition 'provider-error)
+          (not (typep condition 'provider-retryable-error)))
+     "incomplete responses remain terminal provider failures")
+    (test-assert
+     (string= (provider-error-code condition) "max_output_tokens")
+     "incomplete responses retain their structured reason")
+    (test-assert
+     (string= (provider-error-response-id condition) "incomplete-response")
+     "incomplete responses retain their response identifier")
+    (test-assert
+     (search "max_output_tokens" (format nil "~A" condition))
+     "incomplete responses explain why the provider stopped"))
   (dolist (code '("server_is_overloaded" "slow_down" "rate_limit_exceeded"))
     (let* ((source
              (test-sse-event-string

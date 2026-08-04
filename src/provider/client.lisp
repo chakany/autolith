@@ -1177,6 +1177,15 @@ are decoded as UTF-8."
       (t
        nil))))
 
+(-> provider--event-incomplete-reason (json-object) (option string))
+(defun provider--event-incomplete-reason (event)
+  "Return EVENT's structured incomplete-response reason, when present."
+  (let* ((response (provider--event-response event))
+         (details (and response (json-get response "incomplete_details")))
+         (reason (and (json-object-p details)
+                      (json-get details "reason"))))
+    (and (non-empty-string-p reason) reason)))
+
 (-> provider--event-error-code ((option json-object)) (option string))
 (defun provider--event-error-code (error-object)
   "Return ERROR-OBJECT's code or type when either is a non-empty string."
@@ -1259,14 +1268,24 @@ are decoded as UTF-8."
     (event &key type data headers response-id)
   "Signal EVENT as a structured terminal or retryable provider failure."
   (let* ((error-object (provider--event-error-object event))
-         (code (provider--event-error-code error-object))
+         (incomplete-reason
+           (and (string= type "response.incomplete")
+                (provider--event-incomplete-reason event)))
+         (code (or (provider--event-error-code error-object)
+                   incomplete-reason))
          (detail (and error-object (json-get error-object "message")))
          (message
-           (if (non-empty-string-p detail)
-               (format nil "The provider returned ~A.~%~A"
-                       (or code type)
-                       (bounded-string detail :limit 1000))
-               (format nil "The provider ended with ~A." type)))
+           (cond
+             ((non-empty-string-p detail)
+              (format nil "The provider returned ~A.~%~A"
+                      (or code type)
+                      (bounded-string detail :limit 1000)))
+             (incomplete-reason
+              (format nil "The provider ended with ~A.~%Reason: ~A."
+                      type
+                      incomplete-reason))
+             (t
+              (format nil "The provider ended with ~A." type))))
          (condition-type
            (if (provider--retryable-event-error-code-p code)
                'provider-retryable-error
