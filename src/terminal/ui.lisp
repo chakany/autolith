@@ -13,6 +13,19 @@
 (defparameter *terminal-ui-status-spinner-frames-per-second* 4
   "The number of REPL status spinner frames painted each second.")
 
+(defparameter *terminal-ui-default-status-spinner-frames*
+  #("READ" "EVAL" "PRINT" "LOOP")
+  "The read-eval-print-loop cycle painted when no replacement is configured.")
+
+(defparameter *terminal-ui-status-spinner-frames*
+  *terminal-ui-default-status-spinner-frames*
+  "The REPL status spinner cycle painted at the head of the status row.
+
+Any non-empty sequence of non-empty strings is accepted, so `init.lisp' may
+replace the cycle. Every frame is right-padded to the widest frame so the
+status row never shifts as the cycle advances. A malformed value falls back
+to `*terminal-ui-default-status-spinner-frames*' rather than failing a paint.")
+
 (defparameter *terminal-ui-pending-preview-limit* 3
   "The maximum pending inputs previewed for each delivery class.")
 
