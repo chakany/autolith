@@ -328,6 +328,9 @@ related operations."
              ("bad-instructions"
               "(:autolith-skill :version 1 :name \"bad-instructions\" :description \"Bad instructions.\" :instructions nil)"
               :invalid-instructions)
+             ("bad-workflow"
+              "(:autolith-skill :version 1 :name \"bad-workflow\" :description \"Bad workflow.\" :instructions \"x\" :workflow \"../escape.lisp\")"
+              :invalid-workflow)
              ("empty-instructions"
               ,(skill-tests--definition
                 "empty-instructions" "Empty instructions." "   ")
