@@ -57,7 +57,8 @@
   "The maximum selected-skill warning characters injected in one request.")
 
 (defparameter *skill-native-keywords*
-  '(:autolith-skill :version :name :description :instructions :workflow)
+  '(:autolith-skill :version :name :description :instructions :workflow
+    :workflow-self-tools)
   "The complete keyword vocabulary accepted by native skill forms.")
 
 (defparameter *skill-workflow-filename* "WORKFLOW.lisp"
@@ -126,6 +127,13 @@
     :reader skill-metadata-workflow
     :type (option non-empty-string)
     :documentation "The validated relative executable workflow filename.")
+   (workflow-self-tools-p
+    :initarg :workflow-self-tools-p
+    :initform t
+    :reader skill-metadata-workflow-self-tools-p
+    :type boolean
+    :documentation
+    "Whether the workflow receives active-image inspection and mutation tools.")
    (pathname
     :initarg :pathname
     :reader skill-metadata-pathname
@@ -824,6 +832,19 @@ COMMON-LISP from the reader package keeps a bare symbol from naming anything."
        *skill-workflow-filename*)))
   workflow)
 
+(-> skill--validate-workflow-self-tools (t boolean (option string)) boolean)
+(defun skill--validate-workflow-self-tools (value present-p workflow)
+  "Return the workflow self-tool flag after validating its declaration."
+  (when (and present-p (null workflow))
+    (skill--definition-fail
+     :invalid-workflow
+     ":workflow-self-tools requires :workflow."))
+  (when (and present-p (not (or (eq value t) (null value))))
+    (skill--definition-fail
+     :invalid-workflow
+     "The optional :workflow-self-tools value must be T or NIL."))
+  (if present-p (and value t) t))
+
 (-> skill--directory-name (pathname) (option string))
 (defun skill--directory-name (pathname)
   "Return the final directory name containing PATHNAME, when it is textual."
@@ -838,7 +859,7 @@ COMMON-LISP from the reader package keeps a bare symbol from naming anything."
     (pathname &key (:instruction-character-limit (integer 1))
                    (:file-character-limit (integer 1))
                    (:root (option pathname)))
-    (values string string string (option non-empty-string) pathname
+    (values string string string (option non-empty-string) boolean pathname
             (integer 0) (integer 0) (integer 0)))
 (defun skill--parse-definition
     (pathname
@@ -874,7 +895,8 @@ COMMON-LISP from the reader package keeps a bare symbol from naming anything."
                                        :name
                                        :description
                                        :instructions
-                                       :workflow)
+                                       :workflow
+                                       :workflow-self-tools)
                                      :test #'eq)
                        (skill--definition-fail
                         :unknown-field
@@ -910,7 +932,14 @@ COMMON-LISP from the reader package keeps a bare symbol from naming anything."
                    instruction-character-limit))
                 (workflow
                   (skill--validate-workflow
-                   (gethash ':workflow values))))
+                   (gethash ':workflow values)))
+                (workflow-self-tools-p nil))
+            (setf workflow-self-tools-p
+                  (skill--validate-workflow-self-tools
+                   (gethash ':workflow-self-tools values)
+                   (nth-value 1
+                              (gethash ':workflow-self-tools values))
+                   workflow))
             (unless (eql version 1)
               (skill--definition-fail
                :invalid-version
@@ -924,6 +953,7 @@ COMMON-LISP from the reader package keeps a bare symbol from naming anything."
                     description
                     instructions
                     workflow
+                    workflow-self-tools-p
                     canonical-pathname
                     device
                     inode
@@ -944,8 +974,8 @@ COMMON-LISP from the reader package keeps a bare symbol from naming anything."
   "Return metadata or one typed diagnostic for PATHNAME."
   (handler-case
       (multiple-value-bind
-            (name description instructions workflow canonical-pathname device inode
-             source-character-count)
+            (name description instructions workflow workflow-self-tools-p
+             canonical-pathname device inode source-character-count)
           (skill--parse-definition
            pathname
            :instruction-character-limit *skill-file-character-limit*
@@ -957,6 +987,7 @@ COMMON-LISP from the reader package keeps a bare symbol from naming anything."
                         :name name
                         :description description
                         :workflow workflow
+                        :workflow-self-tools-p workflow-self-tools-p
                         :pathname pathname
                         :canonical-pathname canonical-pathname
                         :device device
@@ -1185,12 +1216,13 @@ COMMON-LISP from the reader package keeps a bare symbol from naming anything."
   (let ((pathname (skill-metadata-pathname metadata)))
     (handler-case
         (multiple-value-bind
-              (name description instructions workflow canonical-pathname device inode)
+              (name description instructions workflow workflow-self-tools-p
+               canonical-pathname device inode)
             (skill--parse-definition
              pathname
              :root (skill-metadata-root metadata))
           (declare (ignore description))
-          (declare (ignore workflow))
+          (declare (ignore workflow workflow-self-tools-p))
           (unless (string= name (skill-metadata-name metadata))
             (skill--definition-fail
              :invalid-name
@@ -1238,11 +1270,12 @@ COMMON-LISP from the reader package keeps a bare symbol from naming anything."
   (let ((pathname (skill-metadata-pathname metadata)))
     (handler-case
         (multiple-value-bind
-              (name description instructions workflow canonical-pathname device inode)
+              (name description instructions workflow workflow-self-tools-p
+               canonical-pathname device inode)
             (skill--parse-definition
              pathname
              :root (skill-metadata-root metadata))
-          (declare (ignore description instructions))
+          (declare (ignore description instructions workflow-self-tools-p))
           (unless (and (string= name (skill-metadata-name metadata))
                        (uiop:pathname-equal
                         canonical-pathname
@@ -1360,16 +1393,17 @@ SKILL.LOAD selects a skill; catalog text and durable conversation text do not."
 (defun skill--catalog-guidance ()
   "Return concise skill selection and progressive-disclosure guidance."
   (format nil
-          "~%### Skill rules~%When the user names a listed skill or the task clearly matches a description, call `skill.load` with its exact name before other task actions. Call it once for every applicable skill. Do not read SKILL.sexp through `resource.read`; `skill.load` makes Autolith inject only its :instructions string ephemerally into subsequent provider requests in this logical turn. Do not carry a skill into later turns unless it is selected again.~2%Before acting, read every selected instruction string completely from request-local context. Resolve linked relative paths from the SKILL.sexp directory and load only resources needed for the task. Prefer provided scripts and assets. A `[workflow]` marker means the primary agent may call `skill.run` after applying the selected instructions; never execute an instruction-only skill. If a skill cannot be read or applied, state that briefly and continue with the best fallback."))
+          "~%### Skill rules~%When the user names a listed skill or the task clearly matches a description, call `skill.load` with its exact name before other task actions. Call it once for every applicable skill. Do not read SKILL.sexp through `resource.read`; `skill.load` makes Autolith inject only its :instructions string ephemerally into subsequent provider requests in this logical turn. Do not carry a skill into later turns unless it is selected again.~2%Before acting, read every selected instruction string completely from request-local context. Resolve linked relative paths from the SKILL.sexp directory and load only resources needed for the task. Prefer provided scripts and assets. A marker beginning `[workflow` means the primary agent may call `skill.run` after applying the selected instructions; `no-self` means the workflow cannot call active-image inspection or mutation tools. Never execute an instruction-only skill. If a skill cannot be read or applied, state that briefly and continue with the best fallback."))
 
 (-> skill--catalog-line (skill-metadata &key (:description (option string)))
     string)
 (defun skill--catalog-line (metadata &key description)
   "Render one METADATA line with an optional DESCRIPTION."
   (format nil
-          "- ~A~:[~; [workflow]~]~@[: ~A~] (file: ~A)"
+          "- ~A~:[~; [workflow~:[ no-self~;~]]~]~@[: ~A~] (file: ~A)"
           (skill-metadata-name metadata)
           (skill-metadata-workflow metadata)
+          (skill-metadata-workflow-self-tools-p metadata)
           description
           (namestring (skill-metadata-pathname metadata))))
 
@@ -1900,9 +1934,10 @@ never written to conversation history, memories, summaries, or saved images."
                    (unless first-p
                      (terpri stream))
                    (format stream
-                           "~A~:[~;  workflow~]  ~A~%  ~A"
+                           "~A~:[~;  workflow~:[ no-self~;~]~]  ~A~%  ~A"
                            (skill-metadata-name metadata)
                            (skill-metadata-workflow metadata)
+                           (skill-metadata-workflow-self-tools-p metadata)
                            (namestring (skill-metadata-pathname metadata))
                            (skill-metadata-description metadata)))
           (format stream

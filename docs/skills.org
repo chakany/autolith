@@ -51,11 +51,19 @@ registered tools available to the calling primary agent. It may use ordinary
 Lisp sequencing, conditionals, loops, functions, and error handling, and may
 call operations such as =task.run= and =job.wait=.
 
+The optional =:workflow-self-tools nil= flag removes every registered
+active-image =self.*= operation from that workflow. This covers both inspection
+and mutation tools, unlike session-wide =--immutable= mode, which retains
+inspection. The default is =t= for compatibility, and the flag is rejected on
+an instruction-only Skill.
+
 Workflow code has the user's full privileges and is not sandboxed. The workflow
 file is confined to the Skill directory, must remain a regular file, and is
 reread on every execution. Direct or indirect recursive workflow execution is
 bounded and fails explicitly. Instruction-only Skills remain valid and cannot
-be passed to =skill.run=.
+be passed to =skill.run=. The self-tool flag restricts registered operations;
+it does not prevent trusted Common Lisp code from using language-level
+reflection or mutation directly.
 
 * Discovery and Precedence
 
@@ -83,7 +91,7 @@ Skill.
 * Selection and Request Context
 
 Every normal provider request receives a bounded catalog when at least one
-Skill is available. It contains names, workflow markers, descriptions when they
+Skill is available. It contains names, workflow policy markers, descriptions when they
 fit, and exact file locations. When the user names a Skill or its description
 clearly matches the work, the model calls =skill.load= with the exact name
 before taking actions that depend on it.

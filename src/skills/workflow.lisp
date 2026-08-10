@@ -2,6 +2,39 @@
 
 ;;;; -- Executable Skill Workflows --
 
+(-> skill-workflow--restricted-registry (tool-registry) tool-registry)
+(defun skill-workflow--restricted-registry (registry)
+  "Return REGISTRY's tool view without active-image self tools."
+  (let ((restricted (make-instance 'tool-registry)))
+    (dolist (tool (tool-registry-tools registry))
+      (unless (typep tool 'self-tool)
+        (tool-registry-register restricted tool)))
+    restricted))
+
+(-> skill-workflow--context
+    (tool-context skill-metadata)
+    tool-context)
+(defun skill-workflow--context (context metadata)
+  "Return CONTEXT with METADATA's workflow self-tool policy applied."
+  (if (skill-metadata-workflow-self-tools-p metadata)
+      context
+      (make-instance
+       'tool-context
+       :configuration (tool-context-configuration context)
+       :worker (tool-context-worker context)
+       :conversation (tool-context-conversation context)
+       :mutation-checker (tool-context-mutation-checker context)
+       :registry
+       (skill-workflow--restricted-registry
+        (tool-context-registry context))
+       :command-authorization-function
+       (tool-context-command-authorization-function context)
+       :tool-authorization-function
+       (tool-context-tool-authorization-function context)
+       :agent (tool-context-agent context)
+       :observer (tool-context-observer context)
+       :call-id (tool-context-call-id context))))
+
 (-> skill-workflow--pathname (skill-metadata non-empty-string) pathname)
 (defun skill-workflow--pathname (metadata workflow)
   "Return WORKFLOW's pathname beside METADATA's SKILL.sexp."
@@ -63,12 +96,13 @@
                      *skill-workflow-depth-limit*)
              :tool-name "skill.run"))
     (handler-case
-        (let* ((*skill-workflow-stack*
+        (let* ((workflow-context (skill-workflow--context context metadata))
+               (*skill-workflow-stack*
                  (cons name *skill-workflow-stack*))
-               (*application-operation-tool-context* context)
+               (*application-operation-tool-context* workflow-context)
                (*package* (find-package '#:autolith))
                (output-stream (make-string-output-stream)))
-          (application-operation-install-context-bindings context)
+          (application-operation-install-context-bindings workflow-context)
           (let ((*standard-output* output-stream)
                 (*error-output* output-stream)
                 (*trace-output* output-stream))

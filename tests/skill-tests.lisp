@@ -331,6 +331,12 @@ related operations."
              ("bad-workflow"
               "(:autolith-skill :version 1 :name \"bad-workflow\" :description \"Bad workflow.\" :instructions \"x\" :workflow \"../escape.lisp\")"
               :invalid-workflow)
+             ("bad-workflow-flag"
+              "(:autolith-skill :version 1 :name \"bad-workflow-flag\" :description \"Bad workflow flag.\" :instructions \"x\" :workflow \"WORKFLOW.lisp\" :workflow-self-tools \"sometimes\")"
+              :invalid-workflow)
+             ("orphan-workflow-flag"
+              "(:autolith-skill :version 1 :name \"orphan-workflow-flag\" :description \"Orphan workflow flag.\" :instructions \"x\" :workflow-self-tools nil)"
+              :invalid-workflow)
              ("empty-instructions"
               ,(skill-tests--definition
                 "empty-instructions" "Empty instructions." "   ")

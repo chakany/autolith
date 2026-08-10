@@ -6,6 +6,10 @@
   ()
   (:documentation "A deterministic tool called from executable Skill tests."))
 
+(defclass skill-workflow-test-self-tool (self-tool)
+  ()
+  (:documentation "An active-image tool used to test workflow restriction."))
+
 (defmethod tool-execute
     ((tool skill-workflow-test-tool)
      (context tool-context)
@@ -13,6 +17,14 @@
   "Return the required test value from ARGUMENTS."
   (declare (ignore tool context))
   (tool-success (tool-argument arguments "value" :required t)))
+
+(defmethod tool-execute
+    ((tool skill-workflow-test-self-tool)
+     (context tool-context)
+     (arguments hash-table))
+  "Return a marker when the workflow can reach this self tool."
+  (declare (ignore tool context arguments))
+  (tool-success "self tool reached"))
 
 (-> skill-tool-tests--write (pathname string string) pathname)
 (defun skill-tool-tests--write (root relative-path content)
@@ -289,6 +301,14 @@
       (tool-object-schema
        (json-object "value" (tool-string-property "The returned value."))
        '("value"))))
+    (tool-registry-register
+     registry
+     (make-instance
+      'skill-workflow-test-self-tool
+      :namespace "self"
+      :name "workflow-probe"
+      :description "Report whether a workflow can reach a self tool."
+      :parameters (tool-object-schema (json-object) nil)))
     (let ((context
             (make-instance 'tool-context
                            :configuration configuration
@@ -309,6 +329,14 @@
               skill-root
               "plain/SKILL.sexp"
               "(:autolith-skill :version 1 :name \"plain\" :description \"Instructions only.\" :instructions \"Do the work.\")")
+             (skill-tool-tests--write
+              skill-root
+              "no-self/SKILL.sexp"
+              "(:autolith-skill :version 1 :name \"no-self\" :description \"Run without self tools.\" :instructions \"Do not inspect or mutate Autolith.\" :workflow \"WORKFLOW.lisp\" :workflow-self-tools nil)")
+             (skill-tool-tests--write
+              skill-root
+              "no-self/WORKFLOW.lisp"
+              "(self.workflow-probe)")
              (skill-tool-tests--write
               skill-root
               "escaped/SKILL.sexp"
@@ -342,6 +370,13 @@
                      (search "does not declare a workflow"
                              (tool-result-content result)))
                 "instruction-only Skills cannot be executed"))
+             (let ((result
+                     (skill-tool-tests--run registry context "no-self")))
+               (test-assert
+                (and (not (tool-result-success-p result))
+                     (not (search "self tool reached"
+                                  (tool-result-content result))))
+                "a no-self workflow cannot dispatch inspection or mutation tools"))
              (let ((result
                      (skill-tool-tests--run registry context "escaped")))
                (test-assert
