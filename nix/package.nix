@@ -589,7 +589,7 @@ let
 
 in
 assert with pkgs.stdenv.hostPlatform;
-  (isLinux && isx86_64) || (isDarwin && isAarch64);
+  (isLinux && (isx86_64 || isAarch64)) || (isDarwin && isAarch64);
 assert pkgs.sbcl.version == expectedSbclVersion;
 pkgs.writeShellApplication {
   name = "autolith";
@@ -649,7 +649,7 @@ pkgs.writeShellApplication {
     homepage = "https://github.com/luciusmagn/autolith";
     license = lib.licenses.mit;
     mainProgram = "autolith";
-    platforms = [ "x86_64-linux" "aarch64-darwin" ];
+    platforms = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
   };
 
   passthru = {
