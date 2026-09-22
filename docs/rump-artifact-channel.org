@@ -1,0 +1,100 @@
+#+title: Rumprun artifact channel experiment
+#+date: 2026-09-22
+
+* Result
+
+A real rumprun guest reads one authorized snapshot and writes one bounded
+artifact through an external Common Lisp broker. The guest has no network,
+disk, or host filesystem mount. Authorization occurs outside the guest;
+compromising its application or rump kernel does not grant additional broker
+operations. This is a protocol experiment, not proof of hostile-code
+containment: QEMU, Docker, the host, and the broker are trusted. The legacy
+monitor/toolchain needs replacement and review before security deployment.
+SBCL and Autolith have not booted inside this guest.
+
+The normal guest completes ten exchanges. The host observes three successes
+(including FINISH), four denials, one stale revision, one capacity rejection,
+and one malformed request. Its output is the byte string =approved output=.
+Oversized frames, flooding, truncated traffic, stalling, and abandonment after
+a staged write abort the session and discard writable data.
+
+* Authority and transaction
+
+The host supplies copied snapshots and per-slot read/write permissions.
+The demo grants slot 1 read-only =input snapshot= at revision 1, and slot 2
+write-only capacity 32 at revision 0. Slot IDs are session-local handles, not
+secret authentication tokens. Authority comes from the host's grant table and
+the private per-guest transport; do not share that transport between guests.
+
+The broker accepts binary data, never guest-selected paths or Lisp forms.
+Writes replace staged bytes using an expected revision. FINISH and a flushed
+reply complete the transfer. A failed reply, transport interruption, quota
+violation, or deadline before completion aborts it. Sessions are single-use;
+output access requires completion and returns copies. Output is untrusted
+content: a trusted caller must separately decide whether and where to publish
+it. This experiment performs no filesystem publication.
+
+* Wire format
+
+All integers use unsigned big-endian encoding. Each frame starts with a
+four-byte payload length. The payload begins with this eight-byte header:
+
+| Field | Bytes |
+|-------+-------|
+| Version (1) | 1 |
+| Request opcode or response status | 1 |
+| Slot | 2 |
+| Revision | 4 |
+
+The remaining bytes contain artifact data. READ (1) requires revision zero
+and empty data. WRITE (2) carries the expected revision and replacement bytes.
+FINISH (3) requires slot and revision zero and empty data. Response statuses
+are success (0), denied (1), stale (2), capacity (3), and malformed (4).
+Unknown slots and missing permissions disclose neither data nor revision.
+Successful writes increment the revision; revision overflow is rejected.
+
+The maximum payload is 4104 bytes, including at most 4096 artifact bytes.
+Default session quotas are 16 requests and 16384 total framed bytes across
+both directions. Length and remaining traffic allowance are checked before
+allocation. Invalid frame sizes and partial frames terminate the transaction;
+well-framed invalid requests receive a malformed response.
+
+* Transport and resource bounds
+
+=artifact-guest.c= polls COM2 with static buffers and validates replies.
+=artifact-runner.lisp= connects COM2 to binary process pipes, discarding COM1
+console output. No guest text is rendered in the terminal. QEMU has 256 MiB
+memory, no NIC, disk, VGA, or monitor. The non-root container has a read-only
+filesystem, no mounts or network, dropped capabilities, no-new-privileges,
+512 MiB memory, two CPUs, and a 32-process limit.
+
+The host applies a five-second serving deadline; an inner 30-second watchdog
+bounds QEMU independently. Container creation and cleanup depend on the Docker
+daemon and are outside the serving deadline. Cleanup force-removes only the
+daemon-issued container ID and reaps the client. Serial has no EOF, so a
+truncated or abandoned exchange is detected by deadline rather than EOF.
+
+* Reproduce and verify
+
+Build from the repository root using the pinned sources described in
+[[file:rump-kernel-exploration.org][the runtime exploration report]]:
+
+#+begin_src sh
+docker build --platform linux/arm64 --progress plain \
+  -t autolith-rumprun-probe:local experiments/rumprun
+sbcl --noinform --no-userinit --no-sysinit \
+  --script experiments/rumprun/check-artifacts.lisp
+#+end_src
+
+Use an SBCL with the project's ASDF dependencies available. Append
+=--host-only= to omit Docker tests. The script explicitly loads this workspace,
+then registers two opt-in suites, =rumprun-artifact-broker= and
+=rumprun-artifact-guest=. They are separate from the default repository suites.
+
+Measured on the development host: five cases, 72 checks, zero failures.
+These include authorization, copied input/output data, framing and byte
+quotas, maximum-size writes, revisions, reply failure rollback, and six real
+guest modes. C compilation uses =-Wall -Wextra -Werror=.
+The full =./script/check= command is currently blocked by missing locked
+dependencies (=.qlot/setup.lisp=); these experiment results do not substitute
+for the complete repository check.

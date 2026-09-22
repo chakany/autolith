@@ -18,6 +18,10 @@ This experiment does not boot SBCL or Autolith. It changes no production
 runtime and makes no hostile-code containment claim. The legacy toolchain and
 emulator here are research inputs, not a deployment recommendation.
 
+A subsequent [[file:rump-artifact-channel.org][artifact-channel experiment]] connects a real guest to an external
+broker over dedicated serial, with explicit read/write grants and transactional
+output. It tests authorization independently of the unfinished SBCL port.
+
 * Measured behavior
 
 =experiments/rumprun/runtime-probe.c= is compiled both for Linux ARM64 and for

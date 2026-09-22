@@ -42,6 +42,13 @@ RUN cc -std=gnu11 -Wall -Wextra -Werror -O2 -pthread \
     && /opt/rumprun/bin/rumprun-bake hw_generic \
       /probe/runtime-probe.bin /probe/runtime-probe
 
+COPY artifact-guest.c /probe/artifact-guest.c
+RUN /opt/rumprun/bin/x86_64-rumprun-netbsd-gcc \
+      -std=gnu11 -Wall -Wextra -Werror -O2 \
+      /probe/artifact-guest.c -o /probe/artifact-guest \
+    && /opt/rumprun/bin/rumprun-bake hw_generic \
+      /probe/artifact-guest.bin /probe/artifact-guest
+
 # No workspace mount, guest disk, NIC, monitor, or privileged device required.
 USER 65534:65534
 WORKDIR /probe
