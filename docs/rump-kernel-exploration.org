@@ -1,0 +1,236 @@
+#+title: Rump unikernel exploration
+#+date: 2026-09-22
+
+* Result
+
+The selected direction is the agent as a unikernel, rather than host SBCL
+using a private rump filesystem/network service. A real x86-64 rumprun guest
+was cross-built on ARM Linux and booted under QEMU TCG on this Apple Silicon
+host. Its application generated machine code, executed it, modified it, and
+executed the modified code. Threads and basic thread-local storage worked.
+
+The next substantive problem is an SBCL runtime port. Fixed mappings, mutable
+core-file mappings, page protection, signals, and process creation do not have
+the semantics expected by the existing runtime. These are measured behaviors,
+not conclusions drawn solely from the presence of stubs in source.
+
+This experiment does not boot SBCL or Autolith. It changes no production
+runtime and makes no hostile-code containment claim. The legacy toolchain and
+emulator here are research inputs, not a deployment recommendation.
+
+* Measured behavior
+
+=experiments/rumprun/runtime-probe.c= is compiled both for Linux ARM64 and for
+the x86-64 rumprun guest. Each potentially terminating test gets a separate
+invocation. Both versions compile with =-Wall -Wextra -Werror=.
+
+| Operation | Linux control | Rumprun guest |
+|-----------+---------------+---------------|
+| Thread create/join | Success | Success |
+| Child TLS initialization; parent TLS independence | 11; 11 | 11; 11 |
+| Anonymous writable mapping | Success | Success |
+| Replace own mapping with MAP_FIXED | Same address | Fails, ENOMEM (12) |
+| Execute generated x86-64 code | Not applicable to ARM control | Returns 42 |
+| Modify that code and execute again | Not applicable to ARM control | Returns 43 |
+| Read-only file mapping; verify contents | Success | Success |
+| Mutable executable core-file mapping | Success | Fails, EOPNOTSUPP (45) |
+| mprotect(PROT_READ), then write | SIGSEGV, exit 139 | Returns success; write succeeds |
+| sigaction, then raise(SIGUSR1) | Handler runs | Installation ignored; _lwpabort; guest exits 1 |
+| Fork and verify child exits with code 37 | Child verified | No child verified |
+
+The fork result is particularly misleading: the guest returns 86 with errno
+zero. =waitpid= also returns 86, leaving its status argument unchanged at -1.
+In this NetBSD ABI, 86 is ENOTSUP. A positive fork return alone would falsely
+classify the stub as supported. The probe verifies the child's actual exit
+status instead.
+
+The Linux core-file control initially failed with EPERM because Docker's
+scratch tmpfs was noexec. Repeating with an explicitly executable scratch
+mount succeeded. The corrected control command below includes that setting.
+
+The guest halts after application completion but does not power off QEMU.
+The five-second external timeout therefore returns 124 for all three guest
+modes. Interpret the serial log, including application completion or abort,
+not timeout status alone. A timeout without the expected log is inconclusive.
+
+* Reproduce
+
+From the repository root, with a Docker daemon supporting Linux ARM64:
+
+#+begin_src sh
+docker build --platform linux/arm64 --progress plain \
+  -t autolith-rumprun-probe:local experiments/rumprun
+
+for mode in basic protection signals; do
+  docker run --rm --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges --memory 512m --cpus 2 \
+    autolith-rumprun-probe:local "{\"cmdline\":\"probe $mode\"}"
+done
+#+end_src
+
+The image runs as UID/GID 65534. QEMU receives 256 MiB guest memory, no guest
+NIC or disk, no monitor, and serial output only. The guest has its own tmpfs.
+The Docker container has no workspace bind mount. =-vga none= matters: this
+rumprun console implementation selects serial when the BIOS reports no CRTC.
+Merely disabling the graphical display produced a silent serial console.
+
+Run Linux controls using the same image:
+
+#+begin_src sh
+for mode in basic signals protection; do
+  docker run --rm --network none --read-only \
+    --tmpfs /tmp:rw,exec,nosuid,nodev --cap-drop ALL \
+    --security-opt no-new-privileges --memory 512m --cpus 2 \
+    --ulimit core=0 --entrypoint /probe/linux-control \
+    autolith-rumprun-probe:local "$mode"
+done
+#+end_src
+
+The basic and signals controls exit zero; protection intentionally exits 139.
+The x86-64 generated-code probe is conditional on architecture and is not run
+by the ARM64 Linux control. These are ABI measurements, not a benchmark.
+
+The Dockerfile reproduces the successful build with unmodified upstream
+sources. GCC 7 rejects a legacy signed left shift in libunwind under -Werror;
+=-Wno-error=shift-negative-value= keeps that warning visible while permitting
+the build. It is not a fix for the upstream undefined operation. No unwind
+correctness claim follows from this probe.
+
+The base image digest and source archive hashes are pinned. Ubuntu repository
+package resolution is not a frozen snapshot, and bit-identical rebuilds are
+not asserted. The observed compiler is GCC 7.5.0; the QEMU package is
+=1:2.11+dfsg-1ubuntu7.42=. Use a maintained monitor/toolchain and review their
+attack surface before any hostile-code experiments.
+
+* Source provenance
+
+Reference checkouts outside this worktree were fetched with jj and left
+unedited. Rumprun was refreshed again before building. Source archives for
+the actual build include the exact submodule revisions from its tree:
+
+| Component | Repository | Revision |
+|-----------+------------+----------|
+| rumprun | https://github.com/rumpkernel/rumprun | b04d42225a12a6fae57a78a9c1cf23642e46cd00 |
+| buildrump used by rumprun | https://github.com/rumpkernel/buildrump.sh | 9c9b022cb2115734935e50600c867a3bc230b32c |
+| NetBSD source subset | https://github.com/rumpkernel/src-netbsd | b8b951e911a2fc555848a2785a9998bc128530b6 |
+| buildrump native-host review | https://github.com/rumpkernel/buildrump.sh | 6cccd464a9675ce19eaca569b1c9c2837492038c |
+
+The Dockerfile records archive SHA-256 values and verifies them before
+extracting. Optional Git discovery is disabled; builds do not invoke Git.
+The guest identifies itself as NetBSD 7.99.34 (RUMP-ROAST).
+
+Matching SBCL 2.6.6 source was downloaded from SourceForge and checked against
+=sbcl-source-releases.sha256=:
+=a65a7a30812aaf54925d1192b9b9e810f527c79911c6000b7548105aef7da34b=.
+This source was inspected, not modified or built for rumprun.
+
+* What the SBCL port actually needs
+
+In that SBCL source:
+
+- =src/runtime/bsd-os.inc:os_alloc_gc_space= requests MAP_FIXED for
+  nonmovable or low-address allocations. Substituting malloc without dealing
+  with Lisp address assumptions would not preserve its contract.
+- =src/runtime/os-common.c:load_core_bytes= requests fixed-address file
+  mappings and writable/executable protection for mutable core spaces. The
+  guest probes reproduce both missing prerequisites independently.
+- =src/runtime/os-common.c:os_protect= expects actual protection changes.
+  It also has a software-card-marking path that explicitly avoids protecting
+  dynamic-space pages. Therefore missing mprotect does not imply that every
+  possible SBCL collector configuration is impossible.
+- =src/runtime/bsd-os.c:memory_fault_handler= integrates fault handling with
+  GC and optional safepoints; =src/runtime/interrupt.c= installs signal
+  handlers and uses signal contexts. A successful pthread/TLS smoke test
+  does not establish that SBCL's interrupt and thread model works.
+
+A useful first port slice is a deliberately minimal Lisp guest with an
+explicit memory layout and correct trap delivery. Investigate guest virtual
+memory and a core-loading strategy before bringing in providers or the shell.
+Software card marking may reduce the page-protection work, but guard pages,
+Lisp traps, error handling, and thread interruption need explicit treatment.
+A loader that copies core data into reserved memory is a possible experiment,
+not an implemented solution.
+
+In rumprun, the measured gaps correspond to:
+
+- =lib/librumpkern_mman/sys_mman.c=: MAP_FIXED rejection and read-only-only
+  file mappings.
+- =lib/librumprun_base/syscall_mman.c=: mprotect aliases a successful no-op.
+- =lib/librumprun_base/libc_stubs.c=: process and signal stubs.
+
+These observations concern the pinned upstream revision, not every rump fork
+or the current full NetBSD kernel. A full NetBSD VM would be a useful SBCL
+compatibility control, but would not itself answer the unikernel question.
+
+* Autolith inside the boundary
+
+The conceptual arrangement is a small trusted host supervisor outside a
+self-modifying Lisp guest. The guest can alter its own kernel and application;
+confinement must hold at the monitor/device/service boundary, not at Lisp
+package locks or cooperative syscall wrappers. Missing guest mprotect is an
+SBCL semantic problem, not by itself evidence of a host escape.
+
+Keep provider credentials, terminal ownership, recovery selection, and
+artifact publication authority outside the guest. Grant explicit inputs and
+outputs rather than a writable host checkout or unrestricted host shell RPC.
+An authenticated request is still subject to host-side authorization and
+resource limits. This is a proposed trust model, not an adopted product change.
+
+Existing Autolith integration requirements include:
+
+- =src/workers/lisp.lisp=: separate worker processes and replaceable heaps.
+  A worker per guest is plausible; shared in-guest threads are not equivalent.
+- =src/core/platform-posix.lisp:platform-run-image-saver=: fork/wait-based
+  heap saving. Guest snapshots or an alternative Lisp save/restart protocol
+  require design and recovery tests.
+- POSIX detached execution and =/bin/sh -c=: arbitrary developer commands
+  need a separate execution environment. Starting an unconfined host process
+  through a broker would defeat the intended authority boundary.
+- =src/core/platform.lisp=: platform capability and command-execution
+  protocols are candidate integration seams. Current workers also depend on
+  =sbcl-workers= lifecycle and transport semantics.
+
+* Verification and local artifacts
+
+The experiment image built from the Dockerfile, all three guest modes ran,
+and all three Linux controls ran. Runtime output is summarized above.
+The guest source compiled with warnings treated as errors. No escape,
+performance, garbage-collection, or actual SBCL boot test has been performed.
+
+With full access, =./script/check= gets past the earlier permission error but
+stops at =Locked dependencies are missing; run ./script/bootstrap.= This
+checkout lacks =.qlot/setup.lisp= and the documented =~/quicklisp= bootstrap
+prerequisite. Bootstrap/recovery scripts also contain direct Git invocations,
+which conflict with the user's jj-only operation requirement.
+
+Using the installed Nix dependency closure and explicitly loading this
+worktree's ASDF definition, 11 suitable suites passed: 27 cases, 523 checks,
+zero failures. Suites: core, stream, memory, papercut, agenda, preferences,
+permissions, mcp-configuration, directory-configuration, workspace-resource,
+and fixtures. This is partial repository verification, not a full check pass.
+
+Local build logs and downloaded sources are in =/private/tmp/al-rump-lab=;
+reference checkouts are =/private/tmp/al-rump-reference-rumprun= and
+=/private/tmp/al-rump-reference-buildrump=. The reusable image tag is
+=autolith-rumprun-probe:local=. The exploratory build container is
+=al-rump-build=. These local artifacts contain no provider credentials.
+The earlier =.rump-check= scratch setup was left outside the intended commit
+because its cleanup had been declined.
+
+* Earlier native-host probe
+
+On Darwin 27.0.0 ARM64, buildrump first failed because objcopy was missing.
+Supplying LLVM objcopy 21.1.8 through Nix advanced it to
+=ELF required as target object format=. The reviewed buildrump source also
+explicitly marks Darwin/Mach-O unsupported. The successful route uses Linux
+cross-compilation and an ELF guest instead of trying to load rump natively
+into the Darwin process.
+
+* References
+
+- [[https://github.com/rumpkernel/rumprun/tree/b04d42225a12a6fae57a78a9c1cf23642e46cd00][Inspected rumprun source]].
+- [[https://github.com/rumpkernel/buildrump.sh/tree/9c9b022cb2115734935e50600c867a3bc230b32c][Buildrump revision used in the guest build]].
+- [[https://www.netbsd.org/docs/rump/sysproxy.html][Kernel Servers using Rump]]:
+  a distinct host-client model; its client fork/exec support is not a guest
+  process implementation.
+- [[https://downloads.sourceforge.net/project/sbcl/sbcl/2.6.6/sbcl-2.6.6-source.tar.bz2][SBCL 2.6.6 source archive]].
