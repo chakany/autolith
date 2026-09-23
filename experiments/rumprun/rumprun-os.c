@@ -286,8 +286,14 @@ static int unpack_sources(void)
     return -1;
 }
 
-int main(void)
+/* The guest command line is "sbcl [MEGABYTES]", naming the dynamic space size. */
+int main(int argc, char **argv)
 {
+    char *heap = argc > 1 ? argv[1] : "512";
+    if (argc > 2 || !*heap || strspn(heap, "0123456789") != strlen(heap) || strlen(heap) > 6) {
+        fprintf(stderr, "usage: sbcl [DYNAMIC-SPACE-MEGABYTES]\n");
+        return 1;
+    }
     rumprun_machine_init();
     /* Verify namespace error handling before the first Lisp foreign lookup. */
     if (__wrap_dlerror() || !__wrap_dlopen(NULL, RTLD_NOW) || __wrap_dlerror()
@@ -313,7 +319,7 @@ int main(void)
     /* Contribs, when embedded, live in SBCL's standard SBCL_HOME layout. */
     if (setenv("SBCL_HOME", "/core/sbcl-home/", 1)) { perror("SBCL_HOME"); return 1; }
     char *arguments[] = { "sbcl", "--core", "/core/lisp.core", "--noinform",
-                          "--dynamic-space-size", "512",
+                          "--dynamic-space-size", heap,
                           "--disable-debugger", "--no-sysinit", "--no-userinit",
                           "--script", "/core/script.lisp", NULL };
     return initialize_lisp(11, arguments, environ);
