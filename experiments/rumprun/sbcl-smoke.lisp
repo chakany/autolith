@@ -51,6 +51,58 @@
   (let ((*read-eval* nil))
     (check (equal (read input) '("guest data" 42 #\λ)) "guest filesystem and reader")))
 
+;; Threads run on rumprun's cooperative scheduler, stopped for GC by safepoints.
+(check (equal (sb-thread:join-thread (sb-thread:make-thread (lambda () (list :joined 42))))
+              '(:joined 42))
+       "thread result")
+(let ((lock (sb-thread:make-mutex)) (count 0))
+  (mapc #'sb-thread:join-thread
+        (loop repeat 4
+              collect (sb-thread:make-thread
+                       (lambda ()
+                         (dotimes (index 500)
+                           (sb-thread:with-mutex (lock) (incf count))
+                           (when (zerop (mod index 50)) (sb-thread:thread-yield)))))))
+  (check (= count 2000) "mutual exclusion"))
+(let ((lock (sb-thread:make-mutex)) (queue (sb-thread:make-waitqueue)) (ready nil))
+  (let ((waiter (sb-thread:make-thread
+                 (lambda ()
+                   (sb-thread:with-mutex (lock)
+                     (loop until ready do (sb-thread:condition-wait queue lock))
+                     :woken)))))
+    (sb-thread:with-mutex (lock) (setf ready t) (sb-thread:condition-notify queue))
+    (check (eq (sb-thread:join-thread waiter) :woken) "condition variable handshake"))
+  (check (not (sb-thread:with-mutex (lock) (sb-thread:condition-wait queue lock :timeout 0.2)))
+         "condition wait timeout"))
+(defvar *binding* :global)
+(let ((thread (sb-thread:make-thread (lambda () (let ((*binding* :thread)) (sleep 0.05) *binding*)))))
+  (check (and (eq *binding* :global) (eq (sb-thread:join-thread thread) :thread))
+         "thread-local special bindings"))
+(let* ((lock (sb-thread:make-mutex)) (queue (sb-thread:make-waitqueue))
+       (interrupted nil) (release nil)
+       (waiter (sb-thread:make-thread
+                (lambda ()
+                  (sb-thread:with-mutex (lock)
+                    (loop until release do (sb-thread:condition-wait queue lock)))))))
+  (sleep 0.05)
+  (sb-thread:interrupt-thread waiter (lambda () (setf interrupted sb-thread:*current-thread*)))
+  (loop repeat 200 until interrupted do (sleep 0.01))
+  (sb-thread:with-mutex (lock) (setf release t) (sb-thread:condition-notify queue))
+  (sb-thread:join-thread waiter)
+  (check (eq interrupted waiter) "interrupt a waiting thread"))
+(let* ((stop nil)
+       (workers (loop repeat 3
+                      collect (sb-thread:make-thread
+                               (lambda ()
+                                 (let ((kept (loop for index below 2000 collect (list index))))
+                                   (loop until stop
+                                         do (make-array 1000) (sb-thread:thread-yield))
+                                   (length kept)))))))
+  (dotimes (round 4) (sb-ext:gc :full t) (sb-thread:thread-yield))
+  (setf stop t)
+  (check (equal (mapcar #'sb-thread:join-thread workers) '(2000 2000 2000))
+         "stop-the-world GC with running threads"))
+
 ;; Contribs built inside the guest load through SBCL_HOME like stock SBCL's.
 (require :asdf)
 (check (uiop:version<= "3.3" (asdf:asdf-version)) "ASDF and UIOP contribs")

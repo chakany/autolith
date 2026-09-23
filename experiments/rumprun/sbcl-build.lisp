@@ -72,6 +72,35 @@
            arguments)
    "/build/" log-name))
 
+(defparameter *sbcl-final-wraps* '("___lwp_park60")
+  "Symbols wrapped in the final unikernel link, where rumprun's libraries
+reference them. Other wraps apply earlier, to the runtime's own objects.")
+
+(defun sbcl-build-bake (image binary log-name)
+  "Bake BINARY into the unikernel IMAGE as rumprun-bake does, adding
+*SBCL-FINAL-WRAPS* to its final link, which rumprun-bake cannot extend."
+  (let* ((plan     (uiop:run-program (list "/opt/rumprun/bin/rumprun-bake" "-n" "hw_generic"
+                                           image binary)
+                                     :output ':string :error-output nil))
+         (commands (remove-if-not (lambda (line) (uiop:string-prefix-p "/opt/rumprun/" line))
+                                  (uiop:split-string plan :separator '(#\Newline))))
+         (object   (let* ((copy (first commands))
+                          (end  (length copy)))
+                     (subseq copy (1+ (position #\Space copy :from-end t :end end))))))
+    (unless (and (= (length commands) 2) (search "--redefine-sym main=" (first commands)))
+      (error "Unexpected rumprun-bake plan for ~A:~%~A" binary plan))
+    (sbcl-build-command (list "mkdir" "-p" (directory-namestring object)) "/build/"
+                        (format nil "~A-tmp.log" log-name))
+    (sbcl-build-command (list "sh" "-c" (first commands)) "/build/"
+                        (format nil "~A-copy.log" log-name))
+    (sbcl-build-command (list "sh" "-c"
+                              (format nil "~A~{ -Wl,--wrap=~A~}" (second commands)
+                                      *sbcl-final-wraps*))
+                        "/build/" log-name)
+    (sbcl-build-command (list "rm" "-rf" (directory-namestring object)) "/build/"
+                        (format nil "~A-cleanup.log" log-name))
+    image))
+
 (defun sbcl-build-read-forms (text)
   "Read all generated forms in TEXT without evaluating them."
   (let ((*read-eval* nil)
@@ -313,10 +342,8 @@ if any. Return the guest image path."
      (list "env" "RUMPRUN_STUBLINK=succeed" "make" "-j4" "-C"
            "src/runtime" "sbcl") *sbcl-source-directory*
      (format nil "~A-runtime.log" name))
-    (sbcl-build-command
-     (list "/opt/rumprun/bin/rumprun-bake" "hw_generic" image "src/runtime/sbcl")
-     *sbcl-source-directory* (format nil "~A-bake.log" name))
-    image))
+    (sbcl-build-bake image (namestring (merge-pathnames "src/runtime/sbcl" *sbcl-source-directory*))
+                     (format nil "~A-bake.log" name))))
 
 (defun sbcl-build-boot-exporting (&key name image destination)
   "Boot the SBCL guest IMAGE, require success, and unpack its exports below
@@ -484,14 +511,12 @@ guests, then boot the machine fixture, clock probes, and SBCL smoke guest."
      (list "env" "RUMPRUN_STUBLINK=succeed"
            "/opt/rumprun/bin/x86_64-rumprun-netbsd-gcc" "-O2" "-Wall"
            "-Wextra" "-Werror" "-I" "src/runtime"
-           "-Wl,--wrap=__sigaction14,--wrap=__sigprocmask14,--wrap=__sigaltstack14,--wrap=posix_memalign,--wrap=free"
+           "-Wl,--wrap=__sigaction14,--wrap=__sigprocmask14,--wrap=pthread_sigmask,--wrap=__libc_thr_sigsetmask,--wrap=pthread_create,--wrap=pthread_kill,--wrap=sigwait,--wrap=__sigaltstack14,--wrap=posix_memalign,--wrap=free"
            "/probe/sbcl-machine-test.c" "src/runtime/sbcl-machine.c"
-           "src/runtime/sbcl-traps.S" "-o" "/probe/sbcl-machine-test")
+           "src/runtime/sbcl-traps.S" "-lpthread" "-o" "/probe/sbcl-machine-test")
      *sbcl-source-directory* "13-machine-test-compile.log")
-    (sbcl-build-command
-     (list "/opt/rumprun/bin/rumprun-bake" "hw_generic"
-           "/probe/sbcl-machine-test.bin" "/probe/sbcl-machine-test")
-     *sbcl-source-directory* "14-machine-test-bake.log")
+    (sbcl-build-bake "/probe/sbcl-machine-test.bin" "/probe/sbcl-machine-test"
+                     "14-machine-test-bake.log")
     (sbcl-build-boot :image "/probe/sbcl-machine-test.bin" :command "machine-test"
                      :log-name "15-machine-test-boot.log"
                      :markers '((:prefix "MACHINE-OK:")))
@@ -499,7 +524,7 @@ guests, then boot the machine fixture, clock probes, and SBCL smoke guest."
     (sbcl-build-boot :image "/probe/sbcl.bin" :command "sbcl"
                      :log-name "16-sbcl-smoke-boot.log" :memory 3072 :timeout 300
                      :debug-exit t
-                     :markers '("LISP-SMOKE-OK 17 checks" "SBCL-GUEST-EXIT 0"))
+                     :markers '("LISP-SMOKE-OK 24 checks" "SBCL-GUEST-EXIT 0"))
     (sbcl-build-check-missing-symbols "/build/sbcl-logs/16-sbcl-smoke-boot.log" "/probe/sbcl.bin")
     (format t "SBCL rumprun build and guest checks completed.~%")))
 
