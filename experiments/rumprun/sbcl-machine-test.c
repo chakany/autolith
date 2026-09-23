@@ -467,6 +467,34 @@ static void test_lazy_pages(const struct sigaction *repairing)
     assert(!sigaction(SIGSEGV, &saved_segv, NULL));
 }
 
+/* Raise VECTOR with R8..R11, XMM0, XMM7, and the red zone holding known
+ * values, and require all of them unchanged afterward. */
+#define CHECK_INTERRUPT_PRESERVES(vector) do {                               \
+        uint64_t in = 0x0123456789abcdefUL + (vector), out[6];              \
+        unsigned char redzone_ok;                                           \
+        __asm__ volatile(                                                   \
+            "movq %6,%%r8; movq %6,%%r9; movq %6,%%r10; movq %6,%%r11;"     \
+            "movq %6,%%xmm0; movq %6,%%xmm7; movq $77,-8(%%rsp);"           \
+            "int $" #vector ";"                                             \
+            "movq %%r8,%0; movq %%r9,%1; movq %%r10,%2; movq %%r11,%3;"     \
+            "movq %%xmm0,%4; movq %%xmm7,%5; cmpq $77,-8(%%rsp); sete %%al" \
+            : "=m"(out[0]), "=m"(out[1]), "=m"(out[2]), "=m"(out[3]),       \
+              "=m"(out[4]), "=m"(out[5]), "+r"(in), "=a"(redzone_ok)        \
+            :: "r8", "r9", "r10", "r11", "xmm0", "xmm7", "cc", "memory");   \
+        for (unsigned j = 0; j < 6; ++j) assert(out[j] == in);              \
+        assert(redzone_ok);                                                 \
+    } while (0)
+
+/* Hardware interrupt vectors preserve every register interrupted code may
+ * hold live, including caller-saved and SSE registers, and its red zone.
+ * Software interrupts on the clock vector and an unregistered line take the
+ * same entries as the PIC's. */
+static void test_interrupts(void)
+{
+    CHECK_INTERRUPT_PRESERVES(32);
+    CHECK_INTERRUPT_PRESERVES(39);
+}
+
 int main(void)
 {
     rumprun_machine_init();
@@ -543,6 +571,7 @@ int main(void)
     test_threads(&action);
     test_thread_signals();
     test_lazy_pages(&action);
-    puts("MACHINE-OK: VM ranges/rollback, masks, nested 24KiB stacks, FP preservation/x87/XM vector, unwound handlers, forced traps, threads, thread signals, lazy pages");
+    test_interrupts();
+    puts("MACHINE-OK: VM ranges/rollback, masks, nested 24KiB stacks, FP preservation/x87/XM vector, unwound handlers, forced traps, threads, thread signals, lazy pages, interrupt entries");
     return 0;
 }

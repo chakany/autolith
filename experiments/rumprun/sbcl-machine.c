@@ -40,19 +40,49 @@ struct interrupt_gate {
     uint16_t middle;
     uint32_t high, reserved;
 } __attribute__((packed));
-static void install_gate(unsigned vector, void (*handler)(void))
+static void install_gate(unsigned vector, void (*handler)(void), unsigned ist)
 {
     struct descriptor_pointer descriptor;
     __asm__ volatile("sidt %0" : "=m"(descriptor));
     struct interrupt_gate *gate = (void *)(descriptor.base + vector * 16);
     uintptr_t address = (uintptr_t)handler;
     gate->low = address; gate->middle = address >> 16; gate->high = address >> 32;
-    gate->selector = 8; gate->ist = 4; gate->attributes = 0x8e; gate->reserved = 0;
+    gate->selector = 8; gate->ist = ist; gate->attributes = 0x8e; gate->reserved = 0;
+}
+
+static uintptr_t gate_handler(unsigned vector)
+{
+    struct descriptor_pointer descriptor;
+    __asm__ volatile("sidt %0" : "=m"(descriptor));
+    struct interrupt_gate *gate = (void *)(descriptor.base + vector * 16);
+    return gate->low | ((uintptr_t)gate->middle << 16) | ((uintptr_t)gate->high << 32);
 }
 
 extern void rumprun_trap_0(void), rumprun_trap_3(void), rumprun_trap_6(void);
 extern void rumprun_trap_13(void), rumprun_trap_14(void), rumprun_trap_16(void);
 extern void rumprun_trap_19(void), rumprun_trap_130(void);
+
+/* Hardware interrupts on the PIC's 16 lines, vectors 32..47. */
+#define TRAP_IST 4
+#define IRQ_IST 5
+#define IRQ_LINES 16
+extern void rumprun_irq_0(void), rumprun_irq_1(void), rumprun_irq_2(void);
+extern void rumprun_irq_3(void), rumprun_irq_4(void), rumprun_irq_5(void);
+extern void rumprun_irq_6(void), rumprun_irq_7(void), rumprun_irq_8(void);
+extern void rumprun_irq_9(void), rumprun_irq_10(void), rumprun_irq_11(void);
+extern void rumprun_irq_12(void), rumprun_irq_13(void), rumprun_irq_14(void);
+extern void rumprun_irq_15(void);
+static void (*const irq_entries[IRQ_LINES])(void) = {
+    rumprun_irq_0, rumprun_irq_1, rumprun_irq_2, rumprun_irq_3,
+    rumprun_irq_4, rumprun_irq_5, rumprun_irq_6, rumprun_irq_7,
+    rumprun_irq_8, rumprun_irq_9, rumprun_irq_10, rumprun_irq_11,
+    rumprun_irq_12, rumprun_irq_13, rumprun_irq_14, rumprun_irq_15
+};
+/* Rumprun's handler for each line, which our IST entry calls. */
+uintptr_t rumprun_irq_original[IRQ_LINES];
+static unsigned char irq_stack[16384] __attribute__((aligned(16)));
+static int irq_ready; /* Set once the IRQ IST exists. */
+static void irq_refresh(void);
 
 /* Pages and page tables come whole from the bmk page allocator: an aligned
  * malloc of one page would take a two-page bucket for its header. */
@@ -420,6 +450,7 @@ extern int __real____lwp_park60(clockid_t, int, const struct timespec *, lwpid_t
 int __wrap____lwp_park60(clockid_t clock, int flags, const struct timespec *timeout,
                          lwpid_t unpark, const void *hint, const void *unpark_hint)
 {
+    irq_refresh();
     if (deliver_pending()) {
         if (unpark) _lwp_unpark(unpark, unpark_hint);
         errno = EINTR;
@@ -654,6 +685,36 @@ struct resume_block *rumprun_trap_deliver(struct trap_delivery *delivery)
     return &delivery->resume;
 }
 
+static uint64_t interrupts_disable(void)
+{
+    uint64_t flags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    return flags;
+}
+
+static void interrupts_restore(uint64_t flags)
+{
+    __asm__ volatile("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
+}
+
+/* Put our IST entry on every PIC vector, recording rumprun's handler for
+ * the line. Rumprun installs a device's handler when the device registers
+ * its line, which happens while the rump kernel attaches devices before
+ * main; a later registration is recorded at the next park. */
+static void irq_refresh(void)
+{
+    if (!irq_ready) return;
+    uint64_t flags = interrupts_disable();
+    for (unsigned line = 0; line < IRQ_LINES; ++line) {
+        uintptr_t current = gate_handler(32 + line);
+        if (current != (uintptr_t)irq_entries[line]) {
+            rumprun_irq_original[line] = current;
+            install_gate(32 + line, irq_entries[line], IRQ_IST);
+        }
+    }
+    interrupts_restore(flags);
+}
+
 void rumprun_machine_init(void)
 {
     /* QEMU's selected x86-64 CPU supports NX. Enable it for our page leaves. */
@@ -674,16 +735,19 @@ void rumprun_machine_init(void)
              | (((tss >> 24) & 255) << 56);
     entry[1] = tss >> 32;
     __asm__ volatile("ltr %0" :: "r"(selector) : "memory");
-    exception_ist = (void *)(tss + 36 + 3*8);
+    exception_ist = (void *)(tss + 36 + (TRAP_IST-1)*8);
     *exception_ist = (uintptr_t)(trap_stack + sizeof(trap_stack));
-    install_gate(0, rumprun_trap_0);
-    install_gate(3, rumprun_trap_3);
-    install_gate(6, rumprun_trap_6);
-    install_gate(13, rumprun_trap_13);
-    install_gate(14, rumprun_trap_14);
-    install_gate(16, rumprun_trap_16);
-    install_gate(19, rumprun_trap_19);
-    install_gate(SIGNAL_VECTOR, rumprun_trap_130);
+    *(uint64_t *)(task_state + 36 + (IRQ_IST-1)*8) = (uintptr_t)(irq_stack + sizeof(irq_stack));
+    install_gate(0, rumprun_trap_0, TRAP_IST);
+    install_gate(3, rumprun_trap_3, TRAP_IST);
+    install_gate(6, rumprun_trap_6, TRAP_IST);
+    install_gate(13, rumprun_trap_13, TRAP_IST);
+    install_gate(14, rumprun_trap_14, TRAP_IST);
+    install_gate(16, rumprun_trap_16, TRAP_IST);
+    install_gate(19, rumprun_trap_19, TRAP_IST);
+    install_gate(SIGNAL_VECTOR, rumprun_trap_130, TRAP_IST);
+    irq_ready = 1;
+    irq_refresh();
     /* Route x87 errors to #MF rather than the legacy external IRQ13. */
     uintptr_t control;
     __asm__ volatile("mov %%cr0,%0" : "=r"(control));
