@@ -250,7 +250,7 @@ BROKER-REFUSAL for a wrong token and XDR-ERROR for malformed data."
 (defmethod broker-launch-plan ((policy broker-host-policy) request)
   "Run REQUEST on the host in its working directory, which must lie in an
 exported directory, with the guest's variables over the host environment
-except for protected ones."
+except for protected ones and the guest's RUMPRUN_ configuration."
   (let ((directory (broker-process-request-directory request))
         (roots     (broker-host-policy-directories policy)))
     (unless directory
@@ -262,8 +262,11 @@ except for protected ones."
                              :message (format nil "~A is outside the exported directories."
                                               directory)))
     (let* ((protected (broker-host-policy-protected policy))
+           ;; The guest's own RUMPRUN_ configuration, including its broker
+           ;; token, stays in the guest.
            (guest     (remove-if (lambda (entry)
                                    (or (not (position #\= entry))
+                                       (uiop:string-prefix-p "RUMPRUN_" entry)
                                        (member (broker--variable-name entry) protected
                                                :test #'string=)))
                                  (broker-process-request-environment request)))
