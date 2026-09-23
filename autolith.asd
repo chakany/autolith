@@ -60,6 +60,7 @@
                              (:file "core/platform")
                              (:file "core/platform-posix" :if-feature (:not :win32))
                              (:file "core/platform-win32" :if-feature :win32)
+                             (:file "core/platform-rumprun" :if-feature :rumprun)
                              (:file "core/source-files")
                              (:file "core/streams")
                              (:file "core/text-buffer")
