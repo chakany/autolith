@@ -71,7 +71,7 @@ extern void *rumprun_load_core(int, os_vm_offset_t, os_vm_address_t, os_vm_size_
   (let ((path (merge-pathnames "src/runtime/Config" root)))
     (unless (search "sbcl-machine.c" (uiop:read-file-string path))
       (with-open-file (stream path :direction ':output :if-exists ':append)
-        (format stream "~%OS_SRC += sbcl-machine.c sbcl-clock.c~%ASSEM_SRC += sbcl-traps.S~%CPPFLAGS += -I/build/rumprun/include~%LINKFLAGS += -Wl,--wrap=__sigaction14,--wrap=__sigprocmask14,--wrap=__sigaltstack14,--wrap=dlsym,--wrap=dlopen,--wrap=dlerror,--wrap=_exit,--wrap=__clock_gettime50,--wrap=__gettimeofday50~%")))))
+        (format stream "~%OS_SRC += sbcl-machine.c sbcl-clock.c~%ASSEM_SRC += sbcl-traps.S~%CPPFLAGS += -I/build/rumprun/include~%LINKFLAGS += -Wl,--wrap=__sigaction14,--wrap=__sigprocmask14,--wrap=__sigaltstack14,--wrap=dlsym,--wrap=dlopen,--wrap=dlerror,--wrap=exit,--wrap=_exit,--wrap=__clock_gettime50,--wrap=__gettimeofday50~%")))))
 
 (rump-sbcl-adapt-runtime
  (uiop:ensure-directory-pathname
