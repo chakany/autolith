@@ -11,6 +11,7 @@
 #include <sys/mman.h>
 #include <pthread.h>
 #include <lwp.h>
+#include <bmk-core/pgalloc.h>
 
 #define PAGE 4096UL
 #define PHYSICAL_MASK 0x000ffffffffff000UL
@@ -47,12 +48,18 @@ extern void rumprun_trap_0(void), rumprun_trap_3(void), rumprun_trap_6(void);
 extern void rumprun_trap_13(void), rumprun_trap_14(void), rumprun_trap_16(void);
 extern void rumprun_trap_19(void), rumprun_trap_130(void);
 
+/* Pages and page tables come whole from the bmk page allocator: an aligned
+ * malloc of one page would take a two-page bucket for its header. */
 static void *page_allocate(void)
 {
-    void *page;
-    if (posix_memalign(&page, PAGE, PAGE)) return NULL;
-    memset(page, 0, PAGE);
+    void *page = bmk_pgalloc_one();
+    if (page) memset(page, 0, PAGE);
     return page;
+}
+
+static void page_free(void *page)
+{
+    bmk_pgfree_one(page);
 }
 
 static uint64_t *page_entry(uintptr_t address, int create)
@@ -103,7 +110,7 @@ static void prune_tables(uintptr_t address)
         if (i != 512) break;
         *parents[depth] = 0;
         invalidate(address);
-        free(tables[depth]);
+        page_free(tables[depth]);
     }
 }
 
@@ -162,7 +169,7 @@ int rumprun_vm_unmap(void *base, size_t length)
             void *page = (void *)(*entry & PHYSICAL_MASK);
             *entry = 0;
             invalidate(address + offset);
-            free(page);
+            page_free(page);
         }
     }
     for (size_t offset = 0; offset < length; offset += PAGE)

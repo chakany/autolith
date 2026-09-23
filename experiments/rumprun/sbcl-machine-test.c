@@ -20,29 +20,31 @@ static uintptr_t fp_resume;
 static unsigned char alternate_memory[131072] __attribute__((aligned(16)));
 static int expect_alternate;
 
-/* Test-only linker allocation injection: count only tracked aligned pages. */
+/* Test-only linker allocation injection: count only tracked machine pages. */
 static int allocation_budget = -1;
 static void *tracked[32];
-extern int __real_posix_memalign(void **, size_t, size_t);
-extern void __real_free(void *);
-int __wrap_posix_memalign(void **out, size_t alignment, size_t size)
+extern void *__real_bmk_pgalloc(int);
+extern void __real_bmk_pgfree(void *, int);
+void *__wrap_bmk_pgalloc(int order)
 {
-    if (allocation_budget == 0) return 12;
-    int result = __real_posix_memalign(out, alignment, size);
-    if (!result && allocation_budget > 0) {
+    assert(order == 0);
+    if (allocation_budget == 0) return NULL;
+    void *page = __real_bmk_pgalloc(order);
+    if (page && allocation_budget > 0) {
         --allocation_budget;
         unsigned i;
         for (i = 0; i < 32 && tracked[i]; ++i) {}
         assert(i < 32);
-        tracked[i] = *out;
+        tracked[i] = page;
     }
-    return result;
+    return page;
 }
-void __wrap_free(void *pointer)
+void __wrap_bmk_pgfree(void *page, int order)
 {
+    assert(order == 0);
     for (unsigned i = 0; i < 32; ++i)
-        if (tracked[i] == pointer) tracked[i] = NULL;
-    __real_free(pointer);
+        if (tracked[i] == page) tracked[i] = NULL;
+    __real_bmk_pgfree(page, order);
 }
 
 static void nested_exception(int signal, siginfo_t *info, void *raw)

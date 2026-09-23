@@ -510,8 +510,8 @@ guests, then boot the machine fixture, clock probes, and SBCL smoke guest."
     (sbcl-build-command
      (list "env" "RUMPRUN_STUBLINK=succeed"
            "/opt/rumprun/bin/x86_64-rumprun-netbsd-gcc" "-O2" "-Wall"
-           "-Wextra" "-Werror" "-I" "src/runtime"
-           "-Wl,--wrap=__sigaction14,--wrap=__sigprocmask14,--wrap=pthread_sigmask,--wrap=__libc_thr_sigsetmask,--wrap=pthread_create,--wrap=pthread_kill,--wrap=sigwait,--wrap=__sigaltstack14,--wrap=posix_memalign,--wrap=free"
+           "-Wextra" "-Werror" "-I" "src/runtime" "-I/build/rumprun/include"
+           "-Wl,--wrap=__sigaction14,--wrap=__sigprocmask14,--wrap=pthread_sigmask,--wrap=__libc_thr_sigsetmask,--wrap=pthread_create,--wrap=pthread_kill,--wrap=sigwait,--wrap=__sigaltstack14,--wrap=bmk_pgalloc,--wrap=bmk_pgfree"
            "/probe/sbcl-machine-test.c" "src/runtime/sbcl-machine.c"
            "src/runtime/sbcl-traps.S" "-lpthread" "-o" "/probe/sbcl-machine-test")
      *sbcl-source-directory* "13-machine-test-compile.log")
