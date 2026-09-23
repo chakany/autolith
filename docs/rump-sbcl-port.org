@@ -36,15 +36,16 @@ hostile-code containment claim.
 - Synchronous CPU exceptions reach Lisp as signals: divide error,
   breakpoint, invalid opcode, general protection, page fault, x87 and SIMD
   floating point. Signals sent to a thread with =pthread_kill= reach it at
-  its next park or mask change. There are no timers or process-directed
-  signals.
+  its next park or mask change. A signal sent to the guest process reaches
+  one of its threads as a kernel would choose it. There are no timers.
 - x87 and SSE state is preserved across traps with FXSAVE. AVX state is not,
   so the supported CPU claim stays at =qemu64=, which has no AVX.
 - Foreign code is statically linked. There is no =dlopen= of shared objects.
   OpenSSL 3.6.4 is linked into the Autolith guests for =cl+ssl=.
-- The guest is one process. Creating another fails with =ENOTSUP=, only
-  the guest itself answers =kill= with signal zero, and =waitpid= has no
-  children.
+- The guest cannot fork. Given a host broker, SBCL's =run-program= runs
+  programs on the host instead, as remote children the guest waits for and
+  signals; see [[*Host broker][Host broker]]. Without a broker, creating a process fails
+  with =ENOTSUP= and =waitpid= has no children.
 - Guest pages are backed on first use, so RAM bounds the Lisp memory in use
   rather than the dynamic space reserved. The guest command line =sbcl
   MEGABYTES= sets the dynamic space size, 512 MiB by default.
@@ -85,11 +86,15 @@ All files are in =experiments/rumprun/=.
 | =sbcl-link.lisp= | Static foreign symbol table and embedded core, script, and sources |
 | =rumprun-os.c= | Allocator, core loader, static =dlsym=, export channel, and guest entry point |
 | =sbcl-machine.c=, =sbcl-machine.h=, =sbcl-traps.S= | Guest page tables, exception and interrupt delivery, and signals |
-| =sbcl-process.c= | POSIX failures for rumprun's process stubs |
+| =sbcl-process.c= | Remote processes through the broker, and POSIX failures for rumprun's process stubs |
+| =rumprun-mounts.c= | Guest mounts of the broker's NFS exports |
+| =broker-rpc.lisp=, =broker-nfs.lisp=, =broker-process.lisp= | Host broker: ONC RPC, the NFS service, and the process service |
+| =broker-tests.lisp= | Host tests of the broker services |
 | =sbcl-clock.c= | Monotonic clocks for SBCL |
 | =sbcl-warm-compile.lisp=, =sbcl-warm.lisp= | Warm initialization stages |
 | =sbcl-contribs.lisp=, =sbcl-grovel-main.c= | Contrib stages and the grovel program wrapper |
 | =sbcl-smoke.lisp= | The behavioral checks |
+| =sbcl-nfs-check.lisp=, =sbcl-process-check.lisp= | Guest checks of the broker's exports and host programs |
 | =sbcl-machine-test.c=, =sbcl-clock-test.c= | Guest fixtures for machine support and clocks |
 | =sbcl-build-test.lisp= | Driver tests, including fail-closed extraction |
 | =autolith-stage.lisp= | Host staging of Autolith and its dependency sources |
@@ -163,6 +168,10 @@ aborts, so the runtime supplies what SBCL needs:
   first park or mask change.
 - =sigwait= returns a pending signal from its set, or parks until one
   arrives. SBCL's signal-handling thread depends on it.
+- =kill= of the guest itself delivers a process-directed signal: to a
+  thread waiting for it in =sigwait=, else to a thread that does not block
+  it, else to the initial thread, where it stays pending until unblocked.
+  SBCL learns of a child's exit this way, from =SIGCHLD=.
 - =pthread_sigmask= reaches the per-thread emulation under both its standard
   name and =__libc_thr_sigsetmask=, NetBSD's renamed symbol. Lisp's own
   lookups of wrapped names reach the same wrappers.
@@ -206,12 +215,23 @@ unchanged. A gate rumprun installs later is recorded at the next park.
 
 Rumprun's process stubs return =ENOTSUP= as a positive result, which its
 own source marks as incorrect: =fork= appears to create child 86 and =kill=
-appears to reach every process. The final link wraps them so that process
-creation fails with =ENOTSUP=, =kill= reaches only the guest itself, and
-=waitpid= reports no children. SBCL's =run-program= then signals
-=Couldn't fork child process= instead of returning a process that never
-existed. It also leaked its exec status pipe whenever spawning failed; the
-port closes it.
+appears to reach every process. The final link wraps them so that =fork=
+fails with =ENOTSUP=, and =kill= and =waitpid= see only the guest and its
+remote processes.
+
+The runtime link wraps SBCL's =spawn=. When the guest's environment has
+=RUMPRUN_BROKER=ADDRESS:PORT:TOKEN=, it asks the broker's process service
+to run the program and returns a guest pid for it. Relay threads copy the
+standard streams between the guest descriptors =run-program= passes and
+the connection. =kill= of that pid, or of its process group, is forwarded
+to the broker. The process's exit, or a lost connection, which counts as
+=SIGKILL=, records its wait status and raises =SIGCHLD= in the guest, and
+=waitpid= then reaps it. A refused or missing program is reported through
+SBCL's exec status pipe as a failed exec, so =run-program= signals
+=Couldn't execute= with =EACCES= or =ENOENT=. Pseudo-terminals are not
+relayed. Without a broker, =spawn= falls through to SBCL's own, which
+fails at =fork= with =Couldn't fork child process=. SBCL also leaked its
+exec status pipe whenever spawning failed; the port closes it.
 
 ** Clocks
 
@@ -305,6 +325,54 @@ servers, the search worker, the clean replay probe, the source check, and
 tests that start a second SBCL to hold a conversation lease. A few remain
 unexplained, including two that cannot enter terminal input mode.
 
+* Host broker
+
+The broker is a host program, written in Lisp, that serves one guest over
+TCP; QEMU user networking reaches it at =10.0.2.2=. It runs where the user's
+tools are, so programs it starts see the host's compilers, Nix, Git, and
+other command-line tools. It has two services.
+
+The NFS service serves NFSv3 and MOUNT v3 over TCP for a list of exports,
+each a guest mount path and the host directory it reaches. The guest boot
+mounts every entry of =RUMPRUN_NFS_MOUNTS=, a space-separated list of
+=ADDRESS:PORT:EXPORT:MOUNTPOINT=, with the rump kernel's NFS client. It
+makes the MOUNT call itself, because NetBSD's RPC client needs
+=/etc/netconfig=, which rumprun lacks. Exporting a workspace at its own host
+path gives guest and host programs the same file names. The service never
+follows a host symbolic link while resolving a path, and it checks every
+ancestor of a name inside the export under one lock. Since =sb-posix=
+reports whole seconds, it reports a per-file change counter as the
+nanoseconds of modification and change times; the client otherwise sees
+ambiguous change times and stops trusting its cache.
+
+The process service runs programs for the guest, over one connection per
+process. Each frame is a 32-bit length, a type octet, and an XDR payload:
+a spawn request carrying the token, program, arguments, environment,
+search flag, and working directory; its start or failure; standard stream
+data and ends in both directions; signals in NetBSD numbering, which the
+broker translates by name; and the exit. A policy decides what runs. The
+default refuses everything. The host policy requires the working directory
+to lie in an exported directory, and starts from the host environment,
+letting the guest override it except for =PATH=, =HOME=, =USER=,
+=LOGNAME=, =SHELL=, =TMPDIR=, and =SBCL_HOME=. The guest's own =RUMPRUN_=
+settings, including its token, never reach the host process. The policy
+passes each plan through a sandbox function before it runs. The token
+authenticates the guest to the broker and protects it from other local
+processes. It is not a containment boundary for programs the guest runs.
+
+The broker's host tests run with:
+
+#+begin_src sh
+sbcl --script experiments/rumprun/broker-tests.lisp
+#+end_src
+
+The SBCL build checks both services through real guests. One mounts an
+export and creates, reads, renames, lists, and deletes files in it. The
+other runs host programs in the shared workspace: it checks streams, exit
+status, standard input, the working directory, termination, missing and
+refused programs, and compiles a C program with the host's =cc=, which the
+guest then finds in the workspace and the host runs.
+
 * Reproduce
 
 Build the probe image described in [[file:rump-kernel-exploration.org][the exploration notes]] first. Then build
@@ -355,9 +423,10 @@ request.
 
 * Next steps
 
-- Run Lisp workers as separate guests launched and supervised by a host
-  broker, and =shell.run= through that broker in a host sandbox, following
-  the authorization model of the [[file:rump-artifact-channel.org][artifact channel]].
+- Run Lisp workers as separate guests launched and supervised by the host
+  broker, and run =shell.run= through its process service in a host
+  sandbox, following the authorization model of the [[file:rump-artifact-channel.org][artifact channel]].
+  Then rerun Autolith's suites in a guest with a broker.
 - Keep provider credentials, terminal ownership, recovery selection, and
   artifact publication outside the guest, following the trust model in
   [[file:rump-kernel-exploration.org][the exploration notes]].
