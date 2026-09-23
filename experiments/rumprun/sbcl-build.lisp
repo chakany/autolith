@@ -133,7 +133,7 @@
      "/build/" "09-grovel-boot.log"
      :accepted-statuses '(0 124))
     (sbcl-build-extract-grovel
-     "/build/sbcl-logs/09-grovel-boot.log"
+     (merge-pathnames "09-grovel-boot.log" (uiop:ensure-directory-pathname *sbcl-log-directory*))
      (merge-pathnames "output/stuff-groveled-from-headers.lisp" root))))
 
 (defun sbcl-build-extract-grovel-program (log-path output-path)
