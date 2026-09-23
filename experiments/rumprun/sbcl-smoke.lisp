@@ -1,0 +1,56 @@
+;;;; Behavioral checks executed by SBCL inside the rumprun guest.
+(sb-fasl::!warm-load "src/cold/warm.lisp")
+(defpackage #:autolith (:use #:cl))
+(in-package #:autolith)
+
+(defparameter *checks* 0)
+
+(defun check (value label)
+  "Fail the guest on an incorrect result, reporting a completed check otherwise."
+  (unless value (error "Guest check failed: ~A" label))
+  (incf *checks*)
+  (format t "PASS ~A~%" label))
+
+(check (= (+ 20 22) 42) "arithmetic")
+(let ((function (compile nil '(lambda (x) (+ x 1)))))
+  (check (= (funcall function 41) 42) "runtime native compilation"))
+(compile 'answer '(lambda () 42))
+(check (= (answer) 42) "compiled definition")
+(compile 'answer '(lambda () 43))
+(check (= (answer) 43) "live redefinition")
+
+(let ((function (compile nil '(lambda (value) (car value)))))
+  (check (handler-case (progn (funcall function 42) nil)
+           (type-error () t))
+         "recoverable Lisp type trap"))
+(let ((function (compile nil '(lambda (value) (/ 1 value)))))
+  (check (handler-case (progn (funcall function 0) nil)
+           (division-by-zero () t))
+         "division condition"))
+(check (= 17 (handler-bind ((error (lambda (condition)
+                                    (declare (ignore condition))
+                                    (invoke-restart 'continue-with-value))))
+               (restart-case (error "recoverable")
+                 (continue-with-value () 17)))) "restart")
+
+(defclass counter ()
+  ((value :initarg :value :accessor counter-value)))
+(defgeneric advance (counter))
+(defmethod advance ((object counter)) (incf (counter-value object)))
+(check (= (advance (make-instance 'counter :value 41)) 42) "CLOS dispatch")
+
+(let ((survivors (loop for index below 10000 collect (cons index (1+ index)))))
+  (dotimes (round 8)
+    (loop repeat 10000 collect (make-array 100 :initial-element round))
+    (sb-ext:gc :full t))
+  (check (equal (nth 9999 survivors) '(9999 . 10000)) "full GC survival")
+  (check (= (answer) 43) "compiled code after GC"))
+
+(with-open-file (out "/core/roundtrip.sexp" :direction ':output :if-exists ':supersede)
+  (write '("guest data" 42 #\λ) :stream out))
+(with-open-file (input "/core/roundtrip.sexp")
+  (let ((*read-eval* nil))
+    (check (equal (read input) '("guest data" 42 #\λ)) "guest filesystem and reader")))
+
+(format t "LISP-SMOKE-OK ~D checks~%" *checks*)
+(sb-ext:exit :code 0)
