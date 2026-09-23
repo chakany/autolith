@@ -315,8 +315,12 @@ In the guest, Autolith's rumprun platform adapter inherits the POSIX
 adapter for files, links, permissions, the environment, and local sockets,
 all of which the rump kernel provides. It generates identifiers from the
 kernel's random number generator instead of running =uuidgen=, and it
-reports detached sessions and the forked image saver as withheld. The test
-fixtures withhold forked children, pseudo-terminals, and the POSIX shell.
+reports detached sessions and the forked image saver as withheld. The guest
+offers no workspace command sandbox: =shell.run= commands run on the host
+through the broker's process service, so Autolith disables sandbox mode and
+approved commands run with full access, as the adapter's explanation says.
+The test fixtures withhold forked children, pseudo-terminals, and the POSIX
+shell.
 
 Of 543 cases, 495 pass and 48 fail. The failures are almost all child
 processes the guest cannot create: SBCL Lisp workers for =lisp.*=
