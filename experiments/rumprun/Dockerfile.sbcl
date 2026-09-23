@@ -17,6 +17,7 @@ COPY rumprun-os.c /probe/rumprun-os.c
 COPY sbcl-link.lisp /probe/sbcl-link.lisp
 COPY sbcl-machine.c /probe/sbcl-machine.c
 COPY sbcl-machine.h /probe/sbcl-machine.h
+COPY sbcl-process.c /probe/sbcl-process.c
 COPY sbcl-traps.S /probe/sbcl-traps.S
 COPY sbcl-machine-test.c /probe/sbcl-machine-test.c
 COPY sbcl-clock.c /probe/sbcl-clock.c

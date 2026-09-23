@@ -72,9 +72,10 @@
            arguments)
    "/build/" log-name))
 
-(defparameter *sbcl-final-wraps* '("___lwp_park60")
+(defparameter *sbcl-final-wraps* '("___lwp_park60" "__fork" "__vfork14" "kill" "_sys___wait450")
   "Symbols wrapped in the final unikernel link, where rumprun's libraries
-reference them. Other wraps apply earlier, to the runtime's own objects.")
+reference or define them. Other wraps apply earlier, to the runtime's own
+objects.")
 
 (defun sbcl-build-bake (image binary log-name)
   "Bake BINARY into the unikernel IMAGE as rumprun-bake does, adding
@@ -520,7 +521,7 @@ guests, then boot the machine fixture, clock probes, and SBCL smoke guest."
            "/opt/rumprun/bin/x86_64-rumprun-netbsd-gcc" "-O2" "-Wall"
            "-Wextra" "-Werror" "-I" "src/runtime" "-I/build/rumprun/include"
            "-Wl,--wrap=__sigaction14,--wrap=__sigprocmask14,--wrap=pthread_sigmask,--wrap=__libc_thr_sigsetmask,--wrap=pthread_create,--wrap=pthread_kill,--wrap=sigwait,--wrap=__sigaltstack14,--wrap=bmk_pgalloc,--wrap=bmk_pgfree"
-           "/probe/sbcl-machine-test.c" "src/runtime/sbcl-machine.c"
+           "/probe/sbcl-machine-test.c" "src/runtime/sbcl-machine.c" "src/runtime/sbcl-process.c"
            "src/runtime/sbcl-traps.S" "-lpthread" "-o" "/probe/sbcl-machine-test")
      *sbcl-source-directory* "13-machine-test-compile.log")
     (sbcl-build-bake "/probe/sbcl-machine-test.bin" "/probe/sbcl-machine-test"

@@ -11,7 +11,9 @@
 #include <string.h>
 #include <ucontext.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 static volatile unsigned nested, fp_faults;
 static int nesting;
@@ -495,6 +497,22 @@ static void test_interrupts(void)
     CHECK_INTERRUPT_PRESERVES(39);
 }
 
+/* The guest is one process: creating another fails, only the guest itself
+ * answers signal zero, and there is never a child to wait for. */
+static void test_processes(void)
+{
+    errno = 0;
+    assert(fork() == -1 && errno == ENOTSUP);
+    assert(!kill(getpid(), 0) && !kill(0, 0));
+    errno = 0;
+    assert(kill(getpid() + 1000, 0) == -1 && errno == ESRCH);
+    errno = 0;
+    assert(kill(getpid(), -1) == -1 && errno == EINVAL);
+    int status = -7;
+    errno = 0;
+    assert(waitpid(-1, &status, 0) == -1 && errno == ECHILD && status == -7);
+}
+
 int main(void)
 {
     rumprun_machine_init();
@@ -572,6 +590,7 @@ int main(void)
     test_thread_signals();
     test_lazy_pages(&action);
     test_interrupts();
-    puts("MACHINE-OK: VM ranges/rollback, masks, nested 24KiB stacks, FP preservation/x87/XM vector, unwound handlers, forced traps, threads, thread signals, lazy pages, interrupt entries");
+    test_processes();
+    puts("MACHINE-OK: VM ranges/rollback, masks, nested 24KiB stacks, FP preservation/x87/XM vector, unwound handlers, forced traps, threads, thread signals, lazy pages, interrupt entries, processes");
     return 0;
 }
