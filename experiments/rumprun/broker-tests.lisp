@@ -154,6 +154,18 @@ replies."
         (when (xdr-read-boolean reader)
           (return (nreverse names)))))))
 
+(defun broker-test-mtime (server file)
+  "Return FILE's modification time as seconds and nanoseconds from GETATTR."
+  (multiple-value-bind (status reader)
+      (broker-test-nfs server 1 (lambda (writer) (xdr-write-opaque writer file)))
+    (broker-test-check (zerop status) "GETATTR succeeds")
+    (dotimes (index 5) (xdr-read-unsigned reader))
+    (dotimes (index 2) (xdr-read-hyper reader))
+    (dotimes (index 2) (xdr-read-unsigned reader))
+    (dotimes (index 2) (xdr-read-hyper reader))
+    (dotimes (index 2) (xdr-read-unsigned reader))
+    (list (xdr-read-unsigned reader) (xdr-read-unsigned reader))))
+
 (defun broker-test-octets (text)
   "Return TEXT as UTF-8 octets."
   (sb-ext:string-to-octets text :external-format ':utf-8))
@@ -220,7 +232,11 @@ directory the guest must never reach."
                              "READ returns data from an offset with EOF"))
         (broker-test-check (string= (uiop:read-file-string (concatenate 'string root "/notes.txt"))
                                     "hello nfs")
-                           "writes reach the host file"))
+                           "writes reach the host file")
+        (let ((first (broker-test-mtime server file)))
+          (broker-test-write server file 0 (broker-test-octets "hello NFS"))
+          (broker-test-check (not (equal first (broker-test-mtime server file)))
+                             "two writes within one second report different modification times")))
       (multiple-value-bind (status parent) (broker-test-lookup server root-handle "..")
         (broker-test-check (and (zerop status) (equalp parent root-handle))
                            ".. at the export root stays at the root"))

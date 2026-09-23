@@ -61,6 +61,10 @@ handle from an earlier server is stale rather than misdirected.")
     :initform 0
     :accessor nfs-server-counter
     :documentation "The number of file handles issued.")
+   (stamps
+    :initform (make-hash-table :test #'equal)
+    :reader nfs-server-stamps
+    :documentation "Each host path's change stamp; see NFS--STAMP.")
    (lock
     :initform (sb-thread:make-mutex :name "NFS server")
     :reader nfs-server-lock
@@ -304,9 +308,29 @@ the path's ancestors."
     (sb-posix:syscall-error ()
       nil)))
 
-(defun nfs--write-attributes (writer status call)
-  "Append the fattr3 of host STATUS, owned by CALL's user."
-  (let ((mode (sb-posix:stat-mode status)))
+(defvar *nfs-server* nil
+  "The server performing the current operation, bound during dispatch.")
+
+(defun nfs--stamp (path)
+  "Return host PATH's change stamp: how many times the current server has
+changed it, which the server reports as the sub-second part of its
+modification and change times. Host times have one-second resolution here,
+so without the stamp a guest could not tell two changes within one second
+apart, and NFS clients would stop trusting the attributes around their own
+operations."
+  (gethash path (nfs-server-stamps *nfs-server*) 0))
+
+(defun nfs--touch (&rest paths)
+  "Record a change the current server made to each host path in PATHS."
+  (dolist (path paths)
+    (setf (gethash path (nfs-server-stamps *nfs-server*))
+          (mod (1+ (nfs--stamp path)) 1000000000))))
+
+(defun nfs--write-attributes (writer path status call)
+  "Append the fattr3 of host PATH, whose lstat is STATUS, owned by CALL's
+user."
+  (let ((mode  (sb-posix:stat-mode status))
+        (stamp (nfs--stamp path)))
     (xdr-write-unsigned writer (nfs--type mode))
     (xdr-write-unsigned writer (logand mode #o7777))
     (xdr-write-unsigned writer (sb-posix:stat-nlink status))
@@ -319,31 +343,36 @@ the path's ancestors."
     (xdr-write-unsigned writer 0)
     (xdr-write-hyper writer (ldb (byte 64 0) (sb-posix:stat-dev status)))
     (xdr-write-hyper writer (ldb (byte 64 0) (sb-posix:stat-ino status)))
-    (dolist (seconds (list (sb-posix:stat-atime status) (sb-posix:stat-mtime status)
-                           (sb-posix:stat-ctime status)))
-      (xdr-write-unsigned writer (ldb (byte 32 0) seconds))
-      (xdr-write-unsigned writer 0))))
+    (loop for seconds in (list (sb-posix:stat-atime status) (sb-posix:stat-mtime status)
+                               (sb-posix:stat-ctime status))
+          for nanoseconds in (list 0 stamp stamp)
+          do (xdr-write-unsigned writer (ldb (byte 32 0) seconds))
+             (xdr-write-unsigned writer nanoseconds))))
 
 (defun nfs--write-post-attributes (writer path call)
   "Append post_op_attr for host PATH, absent when PATH cannot be read."
   (let ((status (and path (nfs--status path))))
     (xdr-write-boolean writer status)
     (when status
-      (nfs--write-attributes writer status call))))
+      (nfs--write-attributes writer path status call))))
 
 (defun nfs--pre-attributes (path)
-  "Return host PATH's status before an operation, for wcc_data."
-  (and path (nfs--status path)))
+  "Return host PATH's status and change stamp before an operation, for
+wcc_data, or NIL when PATH cannot be read."
+  (let ((status (and path (nfs--status path))))
+    (and status (cons status (nfs--stamp path)))))
 
 (defun nfs--write-wcc (writer before path call)
-  "Append wcc_data from status BEFORE and host PATH's current attributes."
+  "Append wcc_data from BEFORE, a result of NFS--PRE-ATTRIBUTES, and host
+PATH's current attributes."
   (xdr-write-boolean writer before)
   (when before
-    (xdr-write-hyper writer (sb-posix:stat-size before))
-    (xdr-write-unsigned writer (ldb (byte 32 0) (sb-posix:stat-mtime before)))
-    (xdr-write-unsigned writer 0)
-    (xdr-write-unsigned writer (ldb (byte 32 0) (sb-posix:stat-ctime before)))
-    (xdr-write-unsigned writer 0))
+    (destructuring-bind (status . stamp) before
+      (xdr-write-hyper writer (sb-posix:stat-size status))
+      (xdr-write-unsigned writer (ldb (byte 32 0) (sb-posix:stat-mtime status)))
+      (xdr-write-unsigned writer stamp)
+      (xdr-write-unsigned writer (ldb (byte 32 0) (sb-posix:stat-ctime status)))
+      (xdr-write-unsigned writer stamp)))
   (nfs--write-post-attributes writer path call))
 
 (defun nfs--write-new-handle (writer server path call)
@@ -456,9 +485,11 @@ that cookies stay stable while the directory does not change. Replies list
     (sort names #'string<)))
 
 (defun nfs--directory-verifier (path)
-  "Return the cookie verifier of host directory PATH: its modification time."
+  "Return the cookie verifier of host directory PATH: its modification time
+and change stamp, which differ whenever the server changes the directory."
   (let ((writer (xdr-writer-create)))
-    (xdr-write-hyper writer (ldb (byte 64 0) (sb-posix:stat-mtime (sb-posix:lstat path))))
+    (xdr-write-unsigned writer (ldb (byte 32 0) (sb-posix:stat-mtime (sb-posix:lstat path))))
+    (xdr-write-unsigned writer (nfs--stamp path))
     (xdr-writer->octets writer)))
 
 
@@ -501,7 +532,7 @@ return :UNAVAILABLE for an unknown procedure."
          (let ((path (nfs--resolve server reader)))
            (let ((status (with-nfs-host-call (path) (sb-posix:lstat path))))
              (ok)
-             (nfs--write-attributes writer status call))))
+             (nfs--write-attributes writer path status call))))
         (2
          (let* ((path     (nfs--resolve server reader))
                 (settable (nfs--read-settable reader))
@@ -512,6 +543,7 @@ return :UNAVAILABLE for an unknown procedure."
                (unless (and before (= seconds (ldb (byte 32 0) (sb-posix:stat-ctime before))))
                  (nfs--fail *nfs-error-not-synchronized* path))))
            (nfs--apply-settable path settable)
+           (nfs--touch path)
            (ok)
            (nfs--write-wcc writer before path call)))
         (3
@@ -523,7 +555,7 @@ return :UNAVAILABLE for an unknown procedure."
              (ok)
              (xdr-write-opaque writer (nfs--handle server path))
              (xdr-write-boolean writer t)
-             (nfs--write-attributes writer status call)
+             (nfs--write-attributes writer path status call)
              (nfs--write-post-attributes writer directory call))))
         (4
          (let* ((path    (nfs--resolve server reader))
@@ -533,7 +565,7 @@ return :UNAVAILABLE for an unknown procedure."
                 (execute (getf *nfs-access-bits* :execute)))
            (ok)
            (xdr-write-boolean writer t)
-           (nfs--write-attributes writer status call)
+           (nfs--write-attributes writer path status call)
            (xdr-write-unsigned writer (if (and (sb-posix:s-isreg mode) (zerop (logand mode #o111)))
                                           (logandc2 wanted execute)
                                           wanted))))
@@ -565,6 +597,7 @@ return :UNAVAILABLE for an unknown procedure."
              (unless (= count (length octets))
                (nfs--fail *nfs-error-invalid* path))
              (nfs--write-data path offset octets)
+             (nfs--touch path)
              (ok)
              (nfs--write-wcc writer before path call)
              (xdr-write-unsigned writer (length octets))
@@ -587,6 +620,7 @@ return :UNAVAILABLE for an unknown procedure."
            (nfs--apply-settable path (list :size (getf settable :size)
                                            :atime (getf settable :atime)
                                            :mtime (getf settable :mtime)))
+           (nfs--touch path directory)
            (ok)
            (nfs--write-new-handle writer server path call)
            (nfs--write-wcc writer before directory call)))
@@ -598,6 +632,7 @@ return :UNAVAILABLE for an unknown procedure."
                 (before    (nfs--pre-attributes directory)))
            (nfs--require-directory directory)
            (with-nfs-host-call (path) (sb-posix:mkdir path (or (getf settable :mode) #o755)))
+           (nfs--touch path directory)
            (ok)
            (nfs--write-new-handle writer server path call)
            (nfs--write-wcc writer before directory call)))
@@ -610,6 +645,7 @@ return :UNAVAILABLE for an unknown procedure."
                  (before (nfs--pre-attributes directory)))
              (nfs--require-directory directory)
              (with-nfs-host-call (path) (sb-posix:symlink text path))
+             (nfs--touch path directory)
              (ok)
              (nfs--write-new-handle writer server path call)
              (nfs--write-wcc writer before directory call))))
@@ -626,6 +662,7 @@ return :UNAVAILABLE for an unknown procedure."
                  (sb-posix:unlink path)
                  (sb-posix:rmdir path)))
            (nfs--forget server path)
+           (nfs--touch directory)
            (ok)
            (nfs--write-wcc writer before directory call)))
         (14
@@ -646,6 +683,7 @@ return :UNAVAILABLE for an unknown procedure."
              (nfs--fail *nfs-error-invalid* to))
            (with-nfs-host-call (from) (sb-posix:rename from to))
            (nfs--move server from to)
+           (nfs--touch from-directory to-directory to)
            (ok)
            (nfs--write-wcc writer from-before from-directory call)
            (nfs--write-wcc writer to-before to-directory call)))
@@ -663,6 +701,7 @@ return :UNAVAILABLE for an unknown procedure."
            (when (sb-posix:s-islnk (sb-posix:stat-mode (with-nfs-host-call (file) (sb-posix:lstat file))))
              (nfs--fail *nfs-error-invalid* file))
            (with-nfs-host-call (path) (sb-posix:link file path))
+           (nfs--touch file directory)
            (ok)
            (nfs--write-post-attributes writer file call)
            (nfs--write-wcc writer before directory call)))
@@ -705,7 +744,7 @@ return :UNAVAILABLE for an unknown procedure."
            (xdr-read-hyper reader)
            (xdr-read-unsigned reader)
            (let ((before (nfs--pre-attributes path)))
-             (unless (sb-posix:s-isdir (sb-posix:stat-mode before))
+             (unless (sb-posix:s-isdir (sb-posix:stat-mode (car before)))
                (nfs--with-descriptor path sb-posix:o-rdonly
                                      (lambda (descriptor)
                                        (with-nfs-host-call (path) (sb-posix:fsync descriptor)))))
@@ -747,7 +786,7 @@ the arguments in READER name."
                      (xdr-write-hyper entry index)
                      (when plus
                        (xdr-write-boolean entry t)
-                       (nfs--write-attributes entry status call)
+                       (nfs--write-attributes entry path status call)
                        (xdr-write-boolean entry t)
                        (xdr-write-opaque entry (nfs--handle server path)))
                      (when (> (+ used (length (xdr-writer-octets entry)) 8) limit)
@@ -830,9 +869,10 @@ OCTETS is not a well-formed call, which ends the connection."
                       (xdr-writer->octets writer)))
                (handler-case
                    (if (eq (sb-thread:with-mutex ((nfs-server-lock server))
-                             (if (= program *nfs-program*)
-                                 (nfs-procedure server call writer)
-                                 (nfs-mount-procedure server call writer)))
+                             (let ((*nfs-server* server))
+                               (if (= program *nfs-program*)
+                                   (nfs-procedure server call writer)
+                                   (nfs-mount-procedure server call writer))))
                            :unavailable)
                        (xdr-writer->octets (rpc-reply-header xid *rpc-accept-procedure-unavailable*))
                        (xdr-writer->octets writer))
