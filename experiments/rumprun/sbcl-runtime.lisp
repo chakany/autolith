@@ -64,6 +64,16 @@ extern void *rumprun_load_core(int, os_vm_offset_t, os_vm_address_t, os_vm_size_
                     :before "(native-pathname (sb-alien:extern-alien \"sbcl_runtime\" sb-alien:c-string))"
                     :after "(let ((runtime (sb-alien:extern-alien \"sbcl_runtime\" sb-alien:c-string)))
      (and runtime (native-pathname runtime)))")
+  ;; A failed spawn never reaches wait-for-exec, which closes the exec status
+  ;; pipe, so close it here. Every spawn fails in the guest, which cannot
+  ;; create processes.
+  (rump-sbcl-replace root "src/code/run-program.lisp"
+                    :before "                                        (unless (minusp child)
+                                          (setf child (wait-for-exec child channel))))))))))"
+                    :after "                                        (if (minusp child)
+                                            (progn (sb-unix:unix-close (deref channel 0))
+                                                   (sb-unix:unix-close (deref channel 1)))
+                                            (setf child (wait-for-exec child channel))))))))))")
   ;; Safepoints share their POSIX runtime path with Darwin and Linux.
   (rump-sbcl-replace root "src/cold/shared.lisp"
                      :before "(and sb-safepoint (not (and (or arm64 x86 x86-64) (or darwin linux win32))))"
