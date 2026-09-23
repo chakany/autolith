@@ -21,6 +21,10 @@ COPY sbcl-traps.S /probe/sbcl-traps.S
 COPY sbcl-machine-test.c /probe/sbcl-machine-test.c
 COPY sbcl-clock.c /probe/sbcl-clock.c
 COPY sbcl-clock-test.c /probe/sbcl-clock-test.c
+COPY sbcl-warm-compile.lisp /probe/sbcl-warm-compile.lisp
+COPY sbcl-warm.lisp /probe/sbcl-warm.lisp
+COPY sbcl-contribs.lisp /probe/sbcl-contribs.lisp
+COPY sbcl-grovel-main.c /probe/sbcl-grovel-main.c
 COPY sbcl-smoke.lisp /probe/sbcl-smoke.lisp
 
 RUN sbcl --noinform --no-userinit --no-sysinit --disable-debugger \

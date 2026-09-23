@@ -10,7 +10,8 @@
     (error () t)))
 
 (defun sbcl-build-test-main ()
-  "Exercise process statuses, guest evidence, and fail-closed grovel extraction."
+  "Exercise process statuses, guest evidence, and fail-closed grovel and
+export extraction."
   (let* ((directory (uiop:ensure-directory-pathname
                      (string-trim '(#\Newline #\Return)
                                   (uiop:run-program '("mktemp" "-d" ".sbcl-driver-test.XXXXXX")
@@ -69,9 +70,62 @@
                  (check (sbcl-build-test-error-p
                          (lambda () (sbcl-build-extract-grovel log output))))
                  (check (string= original (uiop:read-file-string output))))))
+           (let ((capture (merge-pathnames "export.bin" directory))
+                 (unpacked (merge-pathnames "unpacked/" directory)))
+             (labels ((fnv (octets)
+                        (let ((hash #xcbf29ce484222325))
+                          (loop for octet across octets
+                                do (setf hash (ldb (byte 64 0)
+                                                   (* (logxor hash octet) #x100000001b3))))
+                          hash))
+
+                      (octets (text)
+                        (map '(vector (unsigned-byte 8)) #'char-code text))
+
+                      (write-capture (records &key (header "RUMPRUN-EXPORT 1")
+                                                   (trailer (format nil "END~%"))
+                                                   corrupt)
+                        ;; Each record is (PATH CONTENT); CORRUPT damages the first hash.
+                        (with-open-file (stream capture :direction ':output :if-exists ':supersede
+                                                        :element-type '(unsigned-byte 8))
+                          (flet ((emit (text) (write-sequence (octets text) stream)))
+                            (emit (format nil "~A~%" header))
+                            (loop for (path content) in records
+                                  for first = t then nil
+                                  do (let ((data (octets content)))
+                                       (emit (format nil "FILE ~A ~D ~(~16,'0x~)~%" path (length data)
+                                                     (logxor (fnv data) (if (and corrupt first) 1 0))))
+                                       (write-sequence data stream)
+                                       (emit (string #\Newline))))
+                            (when trailer (emit trailer)))))
+
+                      (rejected-p (records &rest options)
+                        (apply #'write-capture records options)
+                        (sbcl-build-test-error-p
+                         (lambda () (sbcl-build-extract-exports capture unpacked)))))
+               (write-capture '(("sbcl.core" "core bytes") ("obj/from-self/a.fasl" "")))
+               (check (equal (sbcl-build-extract-exports capture unpacked)
+                             '("sbcl.core" "obj/from-self/a.fasl")))
+               (check (string= (uiop:read-file-string (merge-pathnames "sbcl.core" unpacked))
+                               "core bytes"))
+               (check (zerop (with-open-file (stream (merge-pathnames "obj/from-self/a.fasl" unpacked))
+                               (file-length stream))))
+               (check (rejected-p '(("sbcl.core" "core")) :corrupt t))
+               (check (rejected-p '(("../escape" "x"))))
+               (check (rejected-p '((".hidden" "x"))))
+               (check (rejected-p '(("a//b" "x"))))
+               (check (rejected-p '(("same" "x") ("same" "y"))))
+               (check (rejected-p '(("sbcl.core" "x")) :header "RUMPRUN-EXPORT 2"))
+               (check (rejected-p '(("sbcl.core" "x")) :trailer nil))
+               (check (rejected-p '(("sbcl.core" "x")) :trailer (format nil "END~%extra")))
+               (write-capture '(("sbcl.core" "core bytes")))
+               (let ((text (uiop:read-file-string capture)))
+                 ;; Truncate inside the file data.
+                 (with-open-file (stream capture :direction ':output :if-exists ':supersede)
+                   (write-string (subseq text 0 (- (length text) 8)) stream)))
+               (check (sbcl-build-test-error-p
+                       (lambda () (sbcl-build-extract-exports capture unpacked))))))
            (format t "SBCL-BUILD-TEST-OK ~D checks~%" checks))
-      (dolist (file (uiop:directory-files directory))
-        (delete-file file))
-      (uiop:run-program (list "rmdir" (namestring directory))))))
+      (uiop:run-program (list "rm" "-rf" (namestring directory))))))
 
 (sbcl-build-test-main)

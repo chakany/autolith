@@ -61,15 +61,16 @@
                             *sbcl-source-directory*)))
    "/build/" "05-extract-source.log"))
 
-(defun sbcl-build-run-script (name)
-  "Run one standalone build adaptation script against the source tree."
+(defun sbcl-build-run-script (name &key arguments (log-name (format nil "~A.log" name)))
+  "Run one standalone build script against the source tree with ARGUMENTS."
   (sbcl-build-command
-   (list "sbcl" "--noinform" "--no-userinit" "--no-sysinit"
-         "--disable-debugger" "--script"
-         (namestring (merge-pathnames name "/probe/"))
-         (namestring (uiop:ensure-directory-pathname
-                      *sbcl-source-directory*)))
-   "/build/" (format nil "~A.log" name)))
+   (append (list "sbcl" "--noinform" "--no-userinit" "--no-sysinit"
+                 "--disable-debugger" "--script"
+                 (namestring (merge-pathnames name "/probe/"))
+                 (namestring (uiop:ensure-directory-pathname
+                              *sbcl-source-directory*)))
+           arguments)
+   "/build/" log-name))
 
 (defun sbcl-build-read-forms (text)
   "Read all generated forms in TEXT without evaluating them."
@@ -135,6 +136,105 @@
      "/build/sbcl-logs/09-grovel-boot.log"
      (merge-pathnames "output/stuff-groveled-from-headers.lisp" root))))
 
+(defun sbcl-build-extract-grovel-program (log-path output-path)
+  "Write the Lisp printed between the single SBCL-GROVEL-BEGIN and
+SBCL-GROVEL-END lines of a successful grovel guest's LOG-PATH to OUTPUT-PATH."
+  (let* ((text  (remove #\Return (uiop:read-file-string log-path)))
+         (begin (format nil "~%SBCL-GROVEL-BEGIN~%"))
+         (end   (format nil "~%SBCL-GROVEL-END~%"))
+         (start (search begin text))
+         (stop  (and start (search end text :start2 (+ start (length begin))))))
+    (unless (and start stop
+                 (not (search begin text :start2 (1+ start)))
+                 (not (search end text :start2 (1+ stop)))
+                 (search "=== main() of \"grovel\" returned 0 ===" text :start2 stop))
+      (error "Grovel guest output in ~A is incomplete or ambiguous." log-path))
+    (with-open-file (stream output-path :direction ':output :if-exists ':supersede)
+      (write-string (subseq text (+ start (length begin)) (1+ stop)) stream))
+    (format t "Extracted grovel constants to ~A.~%" output-path)))
+
+(defun sbcl-build-read-export-line (stream)
+  "Read one newline-terminated ASCII line of at most 1100 bytes from STREAM."
+  (let ((bytes (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer t)))
+    (loop for byte = (read-byte stream nil nil)
+          do (cond ((null byte)
+                    (error "Guest export ended inside a header line."))
+                   ((= byte 10)
+                    (return (map 'string #'code-char bytes)))
+                   ((or (< byte 32) (> byte 126) (>= (length bytes) 1100))
+                    (error "Guest export header line is malformed."))
+                   (t
+                    (vector-push-extend byte bytes))))))
+
+(defun sbcl-build-export-path-p (path)
+  "Return T when PATH is a relative path of components made of letters,
+digits, '.', '-', and '_', none of which begins with a dot."
+  (let ((components (uiop:split-string path :separator '(#\/))))
+    (if (every (lambda (component)
+                 (and (plusp (length component))
+                      (char/= (char component 0) #\.)
+                      (every (lambda (character)
+                               (or (alphanumericp character) (find character ".-_")))
+                             component)))
+               components)
+        t
+        nil)))
+
+(defun sbcl-build-copy-export-file (stream output length)
+  "Copy LENGTH bytes from STREAM to OUTPUT and return their FNV-1a 64-bit hash."
+  (declare (type (unsigned-byte 62) length) (optimize (speed 3)))
+  (let ((buffer (make-array 65536 :element-type '(unsigned-byte 8)))
+        (hash #xcbf29ce484222325))
+    (declare (type (unsigned-byte 64) hash))
+    (loop while (plusp length)
+          do (let* ((wanted (min length (length buffer)))
+                    (count  (read-sequence buffer stream :end wanted)))
+               (declare (type fixnum wanted count))
+               (unless (= count wanted)
+                 (error "Guest export ended inside a file."))
+               (dotimes (index count)
+                 (setf hash (ldb (byte 64 0)
+                                 (* (logxor hash (aref buffer index)) #x100000001b3))))
+               (write-sequence buffer output :end count)
+               (decf length count)))
+    hash))
+
+(defun sbcl-build-extract-exports (capture destination)
+  "Unpack the guest export stream in CAPTURE below DESTINATION, verifying each
+file's framing, length, and FNV-1a hash. Return the exported relative paths."
+  (let ((paths nil)
+        (root  (uiop:ensure-directory-pathname destination)))
+    (with-open-file (stream capture :element-type '(unsigned-byte 8))
+      (unless (string= (sbcl-build-read-export-line stream) "RUMPRUN-EXPORT 1")
+        (error "Guest export header missing from ~A." capture))
+      (loop
+        (let* ((line   (sbcl-build-read-export-line stream))
+               (fields (uiop:split-string line :separator '(#\Space))))
+          (when (string= line "END")
+            (unless (null (read-byte stream nil nil))
+              (error "Guest export has data after END."))
+            (return))
+          (destructuring-bind (tag path length hash) fields
+            (let ((length (parse-integer length))
+                  (hash   (parse-integer hash :radix 16)))
+              (unless (and (string= tag "FILE")
+                           (sbcl-build-export-path-p path)
+                           (not (member path paths :test #'string=))
+                           (<= 0 length (1- (expt 2 62))))
+                (error "Guest export record is malformed: ~A" line))
+              (let ((output-path (merge-pathnames path root)))
+                (ensure-directories-exist output-path)
+                (with-open-file (output output-path :direction ':output
+                                                    :if-exists ':supersede
+                                                    :element-type '(unsigned-byte 8))
+                  (unless (= (sbcl-build-copy-export-file stream output length) hash)
+                    (error "Guest export hash mismatch for ~A." path))))
+              (unless (eql (read-byte stream nil nil) 10)
+                (error "Guest export record for ~A is unterminated." path))
+              (push path paths))))))
+    (format t "Extracted ~D guest files from ~A.~%" (length paths) capture)
+    (nreverse paths)))
+
 (defun sbcl-build-validate-guest (log-path markers)
   "Require complete output lines or explicitly marked prefixes in LOG-PATH."
   (let ((lines (uiop:split-string (remove #\Return (uiop:read-file-string log-path))
@@ -148,8 +248,9 @@
         (error "Guest marker ~S missing from ~A" marker log-path)))))
 
 (defun sbcl-build-boot (&key image command log-name (memory 256) (timeout 25)
-                            debug-exit markers)
-  "Boot a guest and validate both QEMU status and guest completion evidence."
+                            debug-exit export markers)
+  "Boot a guest and validate both QEMU status and guest completion evidence.
+EXPORT names the host file that receives the guest's export stream."
   (multiple-value-bind (status log-path)
       (sbcl-build-command
        (append (list "timeout" (write-to-string timeout) "qemu-system-x86_64"
@@ -159,7 +260,9 @@
                      "-no-reboot" "-kernel" image
                      "-append" (format nil "{\"cmdline\":\"~A\"}" command))
                (when debug-exit
-                 '("-device" "isa-debug-exit,iobase=0xf4,iosize=0x04")))
+                 '("-device" "isa-debug-exit,iobase=0xf4,iosize=0x04"))
+               (when export
+                 (list "-debugcon" (format nil "file:~A" export))))
        "/build/" log-name :accepted-statuses (if debug-exit '(1) '(0 124)))
     (declare (ignore status))
     (sbcl-build-validate-guest
@@ -191,8 +294,173 @@
                        :log-name (format nil "~A-boot.log" name)
                        :markers '((:prefix "CLOCK-PROBE: "))))))
 
+(defun sbcl-build-sbcl-guest (&key name core script sources tree lookups)
+  "Link, compile, and bake the SBCL guest NAME embedding CORE, SCRIPT, and
+SOURCES (\"warm\", \"contrib\", \"tree\" with TREE, or \"none\"). LOOKUPS
+is the foreign lookup manifest of the guest that saved or last booted CORE,
+if any. Return the guest image path."
+  (let ((image (format nil "/probe/~A.bin" name)))
+    (sbcl-build-run-script "sbcl-link.lisp"
+                           :arguments (append (list "--core" core "--script" script
+                                                    "--sources" sources)
+                                              (and tree (list "--tree" tree))
+                                              (and lookups (list "--lookups" lookups)))
+                           :log-name (format nil "~A-link.log" name))
+    (sbcl-build-command
+     (list "rm" "-f" "src/runtime/sbcl") *sbcl-source-directory*
+     (format nil "~A-clean.log" name))
+    (sbcl-build-command
+     (list "env" "RUMPRUN_STUBLINK=succeed" "make" "-j4" "-C"
+           "src/runtime" "sbcl") *sbcl-source-directory*
+     (format nil "~A-runtime.log" name))
+    (sbcl-build-command
+     (list "/opt/rumprun/bin/rumprun-bake" "hw_generic" image "src/runtime/sbcl")
+     *sbcl-source-directory* (format nil "~A-bake.log" name))
+    image))
+
+(defun sbcl-build-boot-exporting (&key name image destination)
+  "Boot the SBCL guest IMAGE, require success, and unpack its exports below
+DESTINATION. Return the exported relative paths."
+  (let ((capture (format nil "/build/~A-export.bin" name)))
+    (uiop:delete-file-if-exists capture)
+    (sbcl-build-boot :image image :command "sbcl"
+                     :log-name (format nil "~A-boot.log" name)
+                     :memory 3072 :timeout 900 :debug-exit t :export capture
+                     :markers '("SBCL-GUEST-EXIT 0"))
+    (sbcl-build-extract-exports capture destination)))
+
+(defun sbcl-build-warm-core ()
+  "Build SBCL's warm core inside guests, as make-target-2.sh does natively:
+compile the warm sources in one guest, then load those fasls into a fresh
+cold core in a second guest and save it. Return the warm core path and the
+foreign lookup manifest of the guest that saved it as two values."
+  (let* ((root   *sbcl-source-directory*)
+         (cold   (namestring (merge-pathnames "output/cold-sbcl.core" root)))
+         (fasls  (sbcl-build-boot-exporting
+                  :name "warm-compile"
+                  :image (sbcl-build-sbcl-guest :name "warm-compile" :core cold
+                                                :script "/probe/sbcl-warm-compile.lisp"
+                                                :sources "warm")
+                  :destination "/build/warm-compile-export/")))
+    (unless (and (member "foreign-lookups.txt" fasls :test #'string=)
+                 (every (lambda (path)
+                          (or (string= path "foreign-lookups.txt")
+                              (uiop:string-prefix-p "obj/from-self/" path)))
+                        fasls)
+                 (> (length fasls) 1))
+      (error "The warm compilation guest exported unexpected files: ~S" fasls))
+    (sbcl-build-command (list "rm" "-rf" "obj/from-self") root "warm-fasls-clean.log")
+    (sbcl-build-command (list "cp" "-R" "/build/warm-compile-export/obj" ".") root
+                        "warm-fasls-install.log")
+    (let ((exports (sbcl-build-boot-exporting
+                    :name "warm-load"
+                    :image (sbcl-build-sbcl-guest :name "warm-load" :core cold
+                                                  :script "/probe/sbcl-warm.lisp"
+                                                  :sources "warm")
+                    :destination "/build/warm-export/")))
+      (unless (equal (sort (copy-list exports) #'string<)
+                     '("foreign-lookups.txt" "sbcl.core"))
+        (error "The warm load guest exported unexpected files: ~S" exports))
+      (values "/build/warm-export/sbcl.core" "/build/warm-export/foreign-lookups.txt"))))
+
+(defparameter *sbcl-contribs*
+  '("sb-posix" "sb-bsd-sockets" "sb-rotate-byte" "sb-cltl2" "sb-introspect")
+  "Contribs sbcl-contribs.lisp builds; the first two grovel C constants.")
+
+(defun sbcl-build-grovel-contrib (system program)
+  "Compile the grovel C PROGRAM of SYSTEM, run it as a guest, and install its
+constants where the contrib build guest embeds them."
+  (let* ((root   (uiop:ensure-directory-pathname *sbcl-source-directory*))
+         (object (format nil "/build/~A-grovel.o" system))
+         (binary (format nil "/build/~A-grovel" system))
+         (image  (format nil "/build/~A-grovel.bin" system)))
+    (sbcl-build-command
+     (list "env" "RUMPRUN_STUBLINK=succeed" "/opt/rumprun/bin/x86_64-rumprun-netbsd-gcc"
+           "-Dmain=sbcl_grovel_main" "-c" program "-o" object)
+     "/build/" (format nil "~A-grovel-compile.log" system))
+    (sbcl-build-command
+     (list "env" "RUMPRUN_STUBLINK=succeed" "/opt/rumprun/bin/x86_64-rumprun-netbsd-gcc"
+           "-Wall" "-Wextra" "-Werror" "/probe/sbcl-grovel-main.c" object "-o" binary)
+     "/build/" (format nil "~A-grovel-link.log" system))
+    (sbcl-build-command
+     (list "/opt/rumprun/bin/rumprun-bake" "hw_generic" image binary)
+     "/build/" (format nil "~A-grovel-bake.log" system))
+    (sbcl-build-boot :image image :command "grovel"
+                     :log-name (format nil "~A-grovel-boot.log" system)
+                     :markers '("SBCL-GROVEL-END"))
+    (let ((output (merge-pathnames (format nil "rumprun-grovel/~A.lisp" system) root)))
+      (ensure-directories-exist output)
+      (sbcl-build-extract-grovel-program
+       (merge-pathnames (format nil "~A-grovel-boot.log" system)
+                        (uiop:ensure-directory-pathname *sbcl-log-directory*))
+       output))))
+
+(defun sbcl-build-contribs (warm-core lookups)
+  "Build the contribs inside guests booted from WARM-CORE, whose saving guest
+recorded LOOKUPS: one guest prints the grovel programs, the host runs them as
+guests, and another guest compiles the contribs against their constants.
+Return the exported SBCL_HOME and the building guest's lookup manifest as
+two values."
+  (let ((root (uiop:ensure-directory-pathname *sbcl-source-directory*)))
+    (flet ((guest (name)
+             (sbcl-build-sbcl-guest :name name :core warm-core :lookups lookups
+                                    :script "/probe/sbcl-contribs.lisp"
+                                    :sources "contrib")))
+      (sbcl-build-command (list "rm" "-rf" "rumprun-grovel") root "grovel-clean.log")
+      (let ((programs (sbcl-build-boot-exporting :name "contrib-c" :image (guest "contrib-c")
+                                                 :destination "/build/contrib-c-export/")))
+        (unless (equal (sort (copy-list programs) #'string<)
+                       '("foreign-lookups.txt" "grovel/sb-bsd-sockets.c" "grovel/sb-posix.c"))
+          (error "The contrib grovel guest exported unexpected files: ~S" programs))
+        (dolist (system '("sb-posix" "sb-bsd-sockets"))
+          (sbcl-build-grovel-contrib
+           system (format nil "/build/contrib-c-export/grovel/~A.c" system))))
+      (let ((built    (sbcl-build-boot-exporting :name "contrib-build"
+                                                 :image (guest "contrib-build")
+                                                 :destination "/build/contrib-export/"))
+            (expected (append '("foreign-lookups.txt" "sbcl-home/contrib/asdf.fasl"
+                                "sbcl-home/contrib/uiop.fasl")
+                              (loop for system in *sbcl-contribs*
+                                    append (list (format nil "sbcl-home/contrib/~A.asd" system)
+                                                 (format nil "sbcl-home/contrib/~A.fasl" system))))))
+        (unless (equal (sort (copy-list built) #'string<) (sort expected #'string<))
+          (error "The contrib build guest exported unexpected files: ~S" built))
+        (values "/build/contrib-export/sbcl-home/" "/build/contrib-export/foreign-lookups.txt")))))
+
+(defun sbcl-build-defined-symbols (path)
+  "Return a hash set of the global symbols the object or archive PATH defines."
+  (let ((symbols (make-hash-table :test #'equal)))
+    (dolist (line (uiop:split-string (uiop:run-program
+                                      (list "/opt/rumprun/bin/x86_64-rumprun-netbsd-nm"
+                                            "-g" "--defined-only" path)
+                                      :output ':string)
+                                     :separator '(#\Newline)))
+      (let ((fields (remove "" (uiop:split-string line :separator '(#\Space)) :test #'string=)))
+        (when (= (length fields) 3)
+          (setf (gethash (third fields) symbols) t))))
+    symbols))
+
+(defun sbcl-build-check-missing-symbols (log-path image)
+  "Fail when the guest in LOG-PATH looked up a C symbol that IMAGE or
+rumprun's libc defines: the static table should have provided it. Return the
+missing names, all of which neither defines."
+  (let ((image-symbols (sbcl-build-defined-symbols image))
+        (libc-symbols  (sbcl-build-defined-symbols "/opt/rumprun/rumprun-x86_64/lib/libc.a"))
+        (prefix        "rumprun: missing static foreign symbol ")
+        (missing       nil))
+    (dolist (line (uiop:split-string (remove #\Return (uiop:read-file-string log-path))
+                                     :separator '(#\Newline)))
+      (when (uiop:string-prefix-p prefix line)
+        (pushnew (subseq line (length prefix)) missing :test #'string=)))
+    (dolist (name missing)
+      (when (or (gethash name image-symbols) (gethash name libc-symbols))
+        (error "Guest ~A missed ~A, which the image could provide." log-path name)))
+    (format t "Guest symbols unavailable on rumprun: ~{~A~^ ~}~%" missing)
+    missing))
+
 (defun sbcl-build-main ()
-  "Build and boot the disposable SBCL port, machine fixture, and clock probes."
+  "Build the disposable SBCL port, its warm core, and its contribs inside
+guests, then boot the machine fixture, clock probes, and SBCL smoke guest."
   (let ((archive "/build/sbcl-2.6.6-source.tar.bz2"))
     (sbcl-build-download-source archive)
     (sbcl-build-extract-source archive)
@@ -203,14 +471,15 @@
     (sbcl-build-grovel)
     (sbcl-build-command
      (list "sh" "make-host-2.sh") *sbcl-source-directory* "10-make-host-2.log")
-    (sbcl-build-run-script "sbcl-link.lisp")
-    (sbcl-build-command
-     (list "env" "RUMPRUN_STUBLINK=succeed" "make" "-j4" "-C"
-           "src/runtime" "sbcl") *sbcl-source-directory* "11-runtime-link.log")
-    (sbcl-build-command
-     (list "/opt/rumprun/bin/rumprun-bake" "hw_generic"
-           "/probe/sbcl.bin" "src/runtime/sbcl") *sbcl-source-directory*
-     "12-sbcl-bake.log")
+    (multiple-value-bind (warm-core warm-lookups) (sbcl-build-warm-core)
+      (multiple-value-bind (sbcl-home lookups) (sbcl-build-contribs warm-core warm-lookups)
+        (sbcl-build-command (list "rm" "-rf" "/build/smoke-stage") "/build/" "smoke-clean.log")
+        (sbcl-build-command (list "mkdir" "-p" "/build/smoke-stage") "/build/" "smoke-stage.log")
+        (sbcl-build-command (list "cp" "-R" (string-right-trim "/" sbcl-home) "/build/smoke-stage/")
+                            "/build/" "smoke-contribs.log")
+        (sbcl-build-sbcl-guest :name "sbcl" :core warm-core :lookups lookups
+                               :script "/probe/sbcl-smoke.lisp"
+                               :sources "tree" :tree "/build/smoke-stage/")))
     (sbcl-build-command
      (list "env" "RUMPRUN_STUBLINK=succeed"
            "/opt/rumprun/bin/x86_64-rumprun-netbsd-gcc" "-O2" "-Wall"
@@ -228,9 +497,10 @@
                      :markers '((:prefix "MACHINE-OK:")))
     (sbcl-build-clock-fixtures)
     (sbcl-build-boot :image "/probe/sbcl.bin" :command "sbcl"
-                     :log-name "16-sbcl-smoke-boot.log" :memory 3072 :timeout 600
+                     :log-name "16-sbcl-smoke-boot.log" :memory 3072 :timeout 300
                      :debug-exit t
-                     :markers '("LISP-SMOKE-OK 11 checks" "SBCL-GUEST-EXIT 0"))
+                     :markers '("LISP-SMOKE-OK 17 checks" "SBCL-GUEST-EXIT 0"))
+    (sbcl-build-check-missing-symbols "/build/sbcl-logs/16-sbcl-smoke-boot.log" "/probe/sbcl.bin")
     (format t "SBCL rumprun build and guest checks completed.~%")))
 
 (unless (member :sbcl-build-library *features*)
