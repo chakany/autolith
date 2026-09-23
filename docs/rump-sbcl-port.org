@@ -1,0 +1,133 @@
+#+title: SBCL on rumprun
+#+date: 2026-09-23
+
+* Result
+
+SBCL 2.6.6 is cross-built for the x86-64 rumprun unikernel and boots under
+QEMU TCG. It loads its cold core, completes warm initialization inside the
+guest, and passes eleven behavioral checks: arithmetic, native compilation,
+compiled and live-redefined definitions, a recoverable compiled type error,
+division by zero, restart invocation, CLOS dispatch, repeated full GCs with
+surviving data, compiled code after GC, and a guest file round trip including
+a non-ASCII character. The guest then exits with status 0.
+
+This is an SBCL milestone, not an Autolith port. Autolith has not run in the
+guest. The work lives entirely in =experiments/rumprun/= and changes no
+production runtime. It makes no hostile-code containment claim.
+
+* Scope of the port
+
+- One virtual CPU, one Lisp thread, and the =qemu64= CPU model. Threads,
+  futexes, safepoints, immobile space, and core compression are disabled.
+- Only synchronous CPU exceptions reach Lisp: divide error, breakpoint,
+  invalid opcode, general protection, page fault, x87 and SIMD floating
+  point. Asynchronous POSIX signals, timers, and thread interruption are not
+  implemented.
+- x87 and SSE state is preserved across traps with FXSAVE. AVX state is not,
+  so the supported CPU claim stays at =qemu64=, which has no AVX.
+- Foreign code is statically linked. There is no =dlopen= of shared objects.
+- The guest needs 3 GiB of RAM for a 512 MiB Lisp heap, because every 4 KiB
+  page is a separate aligned allocation from the rumprun heap.
+
+* Components
+
+All files are in =experiments/rumprun/=.
+
+| File | Role |
+|------+------|
+| =Dockerfile.sbcl=, =sbcl-build.lisp= | Build image and driver: pinned download, adaptation, build, and every guest check |
+| =sbcl-configure.lisp= | Cross configuration without running target probes or Git |
+| =sbcl-runtime.lisp= | Exact, repeatable source adaptations and linker wraps |
+| =sbcl-link.lisp= | Static foreign symbol table and embedded core, script, and warm sources |
+| =rumprun-os.c= | Allocator, core loader, static =dlsym=, and guest entry point |
+| =sbcl-machine.c=, =sbcl-machine.h=, =sbcl-traps.S= | Guest page tables and exception delivery |
+| =sbcl-clock.c= | Monotonic clocks for SBCL |
+| =sbcl-smoke.lisp= | Warm initialization and the behavioral checks |
+| =sbcl-machine-test.c=, =sbcl-clock-test.c= | Guest fixtures for machine support and clocks |
+
+** Memory
+
+=sbcl-machine.c= walks the guest's four-level page tables and adds 4 KiB
+mappings above 4 GiB, leaving rumprun's identity map untouched. It enforces
+write protection and NX, zero-fills new pages, invalidates each changed
+translation, and frees pages and emptied tables it owns. SBCL's allocator,
+unmap, and protect calls go through these functions, so guard pages and exact
+remapping behave as SBCL expects.
+
+** Traps
+
+The trap vectors use an interrupt stack table (IST) entry, so the CPU's own
+exception frame never lands on the interrupted Lisp stack. The dispatcher
+converts the frame to a NetBSD =ucontext_t= and =siginfo_t= and calls the
+handler SBCL installed, honoring =sa_mask=, =SA_NODEFER=, and =SA_ONSTACK=.
+It then copies any register or floating-point changes back before =iretq=.
+
+Two properties of this path are load-bearing:
+
+- The signal frame lives on the handler's stack, below the interrupted red
+  zone, as a kernel would place it. SBCL without threads does not visit
+  interrupt contexts during GC. It finds registers of interrupted code only by
+  conservatively scanning the control stack. With the context kept on the IST
+  instead, an object referenced only from a register at a GC-triggering trap
+  was freed. The resumed code then stored a dangling pointer into the heap.
+- Lisp routinely unwinds out of handlers. Each dispatch records its IST
+  partition and handler stack. A later trap that arrives outside a recorded
+  handler's stack proves that handler was unwound, and its partition is
+  reused. A fixed depth counter leaked a partition per unwind and aborted
+  after three.
+
+** Clocks
+
+The NetBSD timecounter in this rumprun build can run backward when no
+scheduler tick intervenes, which made the first warm GC compute a negative
+elapsed time.
+=sbcl-clock.c= wraps =clock_gettime= and =gettimeofday= with rumprun's
+full-width monotonic clock. =sbcl-clock-test.c= reproduces the reversal on
+the native clocks and requires monotonic results from the wrapped ones.
+
+** Foreign symbols
+
+=sbcl-link.lisp= builds a static =dlsym= table. Names from genesis's alien
+linkage map are strong references, so a missing one fails the link. Names
+that warm-loaded sources use are found by scanning alien forms, including
+symbol-named routines and =with-alien= bindings. A warm name that rumprun's
+libc defines is also strong, because a weak reference never extracts an
+archive member. The remaining warm names are weak: one the image does not
+define resolves to NULL, and looking it up reports
+=rumprun: missing static foreign symbol=. None of the unresolved names exists
+in rumprun's libc. They belong to facilities this build disables, such as
+threads, immobile space, and core compression, or to other platforms and
+architectures.
+
+* Reproduce
+
+Build the probe image described in [[file:rump-kernel-exploration.org][the exploration notes]] first. Then build
+and verify the port from pinned source:
+
+#+begin_src sh
+docker build -f experiments/rumprun/Dockerfile.sbcl \
+  -t autolith-rumprun-sbcl:local experiments/rumprun
+#+end_src
+
+The build downloads SBCL 2.6.6 source from SourceForge and requires SHA-256
+=a65a7a30812aaf54925d1192b9b9e810f527c79911c6000b7548105aef7da34b=.
+It then boots the header grovel, the machine fixture, both clock fixtures,
+and the SBCL smoke guest, and fails unless each prints its expected marker.
+The SBCL guest reports its exit status through QEMU's =isa-debug-exit=
+device, so the driver requires QEMU status 1, which encodes guest status 0.
+The apt packages in the image are not frozen. The build is repeatable from
+pinned sources, not bit-identical.
+
+On the Apple Silicon development host, the SBCL guest took 288 seconds from
+boot to exit under TCG emulation, most of it warm compilation. The driver
+allows 600.
+
+* Next steps
+
+- Run Autolith's own system inside the guest. That needs its dependencies
+  loaded in the guest and a design for what worker processes and image saving
+  mean without =fork=.
+- Decide which authority stays outside the guest, following the trust model
+  in [[file:rump-kernel-exploration.org][the exploration notes]] and the [[file:rump-artifact-channel.org][artifact channel]].
+- Replace per-page heap allocations with a physical page allocator, which
+  would shrink the RAM requirement.

@@ -18,6 +18,9 @@ This experiment does not boot SBCL or Autolith. It changes no production
 runtime and makes no hostile-code containment claim. The legacy toolchain and
 emulator here are research inputs, not a deployment recommendation.
 
+A later [[file:rump-sbcl-port.org][SBCL port]] boots SBCL through warm initialization in the guest. It
+does not run Autolith.
+
 A subsequent [[file:rump-artifact-channel.org][artifact-channel experiment]] connects a real guest to an external
 broker over dedicated serial, with explicit read/write grants and transactional
 output. It tests authorization independently of the unfinished SBCL port.
