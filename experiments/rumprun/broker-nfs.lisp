@@ -917,7 +917,8 @@ thread per connection. Return the listening socket and the port it bound."
                         (sb-bsd-sockets:socket-make-stream connection :input t :output t
                                                                       :element-type '(unsigned-byte 8)
                                                                       :buffering ':full))
-                    (sb-bsd-sockets:socket-close connection)))
+                    ;; Serving is over; unsent output has no reader left.
+                    (sb-bsd-sockets:socket-close connection :abort t)))
                 :name "NFS connection")))
          (sb-bsd-sockets:socket-error ()
            nil)))
