@@ -238,6 +238,7 @@
                 :components ((:file "test-support")
                              (:file "posix-fixtures" :if-feature (:not :win32))
                              (:file "win32-fixtures" :if-feature :win32)
+                             (:file "rumprun-fixtures" :if-feature :rumprun)
                              (:file "device-authentication-test-support")
                              (:file "stream-tests")
                              (:file "memory-tests")
