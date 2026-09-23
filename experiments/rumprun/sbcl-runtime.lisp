@@ -20,8 +20,8 @@
 (defun rump-sbcl-adapt-runtime (root)
   "Install the experiment's C/assembly files and explicit runtime integration."
   (let ((here (uiop:pathname-directory-pathname *load-truename*)))
-    (dolist (name '("rumprun-os.c" "sbcl-clock.c" "sbcl-machine.c" "sbcl-machine.h" "sbcl-process.c"
-                    "sbcl-traps.S"))
+    (dolist (name '("rumprun-os.c" "rumprun-mounts.c" "rumprun-mounts.h" "sbcl-clock.c"
+                    "sbcl-machine.c" "sbcl-machine.h" "sbcl-process.c" "sbcl-traps.S"))
       (uiop:copy-file (merge-pathnames name here)
                       (merge-pathnames (concatenate 'string "src/runtime/" name) root))))
   (rump-sbcl-replace root "src/runtime/bsd-os.c"
@@ -87,7 +87,7 @@ extern void *rumprun_load_core(int, os_vm_offset_t, os_vm_address_t, os_vm_size_
   (let ((path (merge-pathnames "src/runtime/Config" root)))
     (unless (search "sbcl-machine.c" (uiop:read-file-string path))
       (with-open-file (stream path :direction ':output :if-exists ':append)
-        (format stream "~%OS_SRC += sbcl-machine.c sbcl-clock.c sbcl-process.c~%ASSEM_SRC += sbcl-traps.S~%CPPFLAGS += -I/build/rumprun/include~%LINKFLAGS += -Wl,--wrap=__sigaction14,--wrap=__sigprocmask14,--wrap=pthread_sigmask,--wrap=__libc_thr_sigsetmask,--wrap=pthread_create,--wrap=pthread_kill,--wrap=sigwait,--wrap=__sigaltstack14,--wrap=dlsym,--wrap=dlopen,--wrap=dlerror,--wrap=exit,--wrap=_exit,--wrap=__clock_gettime50,--wrap=__gettimeofday50~%")))))
+        (format stream "~%OS_SRC += sbcl-machine.c sbcl-clock.c sbcl-process.c rumprun-mounts.c~%ASSEM_SRC += sbcl-traps.S~%CPPFLAGS += -I/build/rumprun/include~%LINKFLAGS += -Wl,--wrap=__sigaction14,--wrap=__sigprocmask14,--wrap=pthread_sigmask,--wrap=__libc_thr_sigsetmask,--wrap=pthread_create,--wrap=pthread_kill,--wrap=sigwait,--wrap=__sigaltstack14,--wrap=dlsym,--wrap=dlopen,--wrap=dlerror,--wrap=exit,--wrap=_exit,--wrap=__clock_gettime50,--wrap=__gettimeofday50~%")))))
 
 (rump-sbcl-adapt-runtime
  (uiop:ensure-directory-pathname

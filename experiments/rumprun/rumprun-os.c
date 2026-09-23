@@ -4,6 +4,7 @@
 #include "os.h"
 #include "interr.h"
 #include "sbcl-machine.h"
+#include "rumprun-mounts.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -358,7 +359,7 @@ int main(int argc, char **argv)
         || write_guest_file("/core/script.lisp", rumprun_script_start, rumprun_script_end))
         return 1;
     if (chdir("/core") || unpack_sources()) { perror("embedded sources"); return 1; }
-    if (write_resolver()) return 1;
+    if (write_resolver() || rumprun_mount_nfs_from_environment()) return 1;
     /* Contribs, when embedded, live in SBCL's standard SBCL_HOME layout. */
     if (setenv("SBCL_HOME", "/core/sbcl-home/", 1)) { perror("SBCL_HOME"); return 1; }
     char *arguments[] = { "sbcl", "--core", "/core/lisp.core", "--noinform",

@@ -131,6 +131,14 @@ export extraction."
                    (write-string (subseq text 0 (- (length text) 8)) stream)))
                (check (sbcl-build-test-error-p
                        (lambda () (sbcl-build-extract-exports capture unpacked))))))
+           ;; Guest configurations: command, environment, and network.
+           (loop for (arguments expected)
+                   in '((("sbcl" nil nil) "{\"cmdline\":\"sbcl\"}")
+                        (("sbcl 2048" nil ("A=1" "B=2"))
+                         "{\"cmdline\":\"sbcl 2048\",\"env\":\"A=1\",\"env\":\"B=2\"}")
+                        (("sbcl" t nil)
+                         "{\"cmdline\":\"sbcl\",\"net\":{\"if\":\"vioif0\",\"type\":\"inet\",\"method\":\"dhcp\"}}"))
+                 do (check (string= (apply #'sbcl-build-guest-configuration arguments) expected)))
            (format t "SBCL-BUILD-TEST-OK ~D checks~%" checks))
       (uiop:run-program (list "rm" "-rf" (namestring directory))))))
 

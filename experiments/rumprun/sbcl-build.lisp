@@ -86,6 +86,10 @@ diagnosed.")
            arguments)
    "/build/" log-name))
 
+(defparameter *sbcl-final-components* '("rumpfs_nfs")
+  "Rump kernel components linked into every SBCL guest beyond rumprun-bake's
+hw_generic set: the NFS client, which mounts the broker's exports.")
+
 (defparameter *sbcl-final-wraps* '("___lwp_park60" "__fork" "__vfork14" "kill" "_sys___wait450")
   "Symbols wrapped in the final unikernel link, where rumprun's libraries
 reference or define them. Other wraps apply earlier, to the runtime's own
@@ -195,8 +199,9 @@ alignment bmk's TLS areas provide, since the linker rounds it up to that."
 
 (defun sbcl-build-bake (image binary log-name)
   "Bake BINARY into the unikernel IMAGE as rumprun-bake does, adding
-*SBCL-FINAL-WRAPS* to its final link, which rumprun-bake cannot extend, and
-linking with the corrected TLS layout, which the result is checked for."
+*SBCL-FINAL-COMPONENTS* and *SBCL-FINAL-WRAPS* to its final link, which
+rumprun-bake cannot extend, and linking with the corrected TLS layout, which
+the result is checked for."
   (let* ((plan     (uiop:run-program (list "/opt/rumprun/bin/rumprun-bake" "-n" "hw_generic"
                                            image binary)
                                      :output ':string :error-output nil))
@@ -212,12 +217,13 @@ linking with the corrected TLS layout, which the result is checked for."
     (sbcl-build-command (list "sh" "-c" (first commands)) "/build/"
                         (format nil "~A-copy.log" log-name))
     (sbcl-build-command (list "sh" "-c"
-                              (format nil "~A~{ -Wl,--wrap=~A~}"
+                              (format nil "~A~{ -l~A~}~{ -Wl,--wrap=~A~}"
                                       (sbcl-build-replace-exactly
                                        (second commands)
                                        (format nil "-specs=~A" *sbcl-bake-specs*)
                                        (format nil "-specs=~A" (sbcl-build-tls-specs))
                                        "bake specs")
+                                      *sbcl-final-components*
                                       *sbcl-final-wraps*))
                         "/build/" log-name)
     (sbcl-build-check-tls image)
@@ -400,18 +406,30 @@ file's framing, length, and FNV-1a hash. Return the exported relative paths."
                     lines)
         (error "Guest marker ~S missing from ~A" marker log-path)))))
 
+(defun sbcl-build-guest-configuration (command network environment)
+  "Return rumprun's JSON configuration running COMMAND, with each of the
+NAME=VALUE strings in ENVIRONMENT set and, when NETWORK, the virtio NIC
+configured by DHCP."
+  (format nil "{\"cmdline\":\"~A\"~{,\"env\":\"~A\"~}~:[~;,\"net\":{\"if\":\"vioif0\",\"type\":\"inet\",\"method\":\"dhcp\"}~]}"
+          command environment network))
+
 (defun sbcl-build-boot (&key image command log-name (memory 256) (timeout 25)
-                            debug-exit export markers)
+                            debug-exit export markers network environment)
   "Boot a guest and validate both QEMU status and guest completion evidence.
-EXPORT names the host file that receives the guest's export stream."
+EXPORT names the host file that receives the guest's export stream. With
+NETWORK, the guest has a virtio NIC on QEMU user networking, where the host
+is 10.0.2.2; ENVIRONMENT lists NAME=VALUE strings to set in the guest."
   (multiple-value-bind (status log-path)
       (sbcl-build-command
        (append (list "timeout" (write-to-string timeout) "qemu-system-x86_64"
                      "-machine" "pc,accel=tcg" "-cpu" "qemu64"
-                     "-m" (write-to-string memory) "-net" "none" "-vga" "none"
+                     "-m" (write-to-string memory) "-vga" "none"
                      "-display" "none" "-serial" "stdio" "-monitor" "none"
                      "-no-reboot" "-kernel" image
-                     "-append" (format nil "{\"cmdline\":\"~A\"}" command))
+                     "-append" (sbcl-build-guest-configuration command network environment))
+               (if network
+                   '("-netdev" "user,id=net0" "-device" "virtio-net-pci,netdev=net0")
+                   '("-net" "none"))
                (when debug-exit
                  '("-device" "isa-debug-exit,iobase=0xf4,iosize=0x04"))
                (when export
@@ -582,6 +600,38 @@ two values."
           (error "The contrib build guest exported unexpected files: ~S" built))
         (values "/build/contrib-export/sbcl-home/" "/build/contrib-export/foreign-lookups.txt")))))
 
+(defun sbcl-build-nfs-check (warm-core lookups)
+  "Serve a host directory with the broker's NFS service and boot a guest from
+WARM-CORE that mounts it as /workspace and works on it. Require the guest's
+evidence and the host-side results of its writes."
+  (load "/probe/broker-rpc.lisp")
+  (load "/probe/broker-nfs.lisp")
+  (let ((export "/build/nfs-check/"))
+    (sbcl-build-command (list "rm" "-rf" export) "/build/" "nfs-clean.log")
+    (ensure-directories-exist export)
+    (with-open-file (out (merge-pathnames "hello.txt" export) :direction ':output)
+      (write-line "hello from the host" out))
+    (multiple-value-bind (listener port)
+        (uiop:symbol-call :autolith :nfs-server-listen
+                          (uiop:symbol-call :autolith :nfs-server-create
+                                            (list (list "/workspace" export))))
+      (unwind-protect
+           (let ((image (sbcl-build-sbcl-guest :name "nfs-check" :core warm-core :lookups lookups
+                                               :script "/probe/sbcl-nfs-check.lisp"
+                                               :sources "tree" :tree "/build/smoke-stage/")))
+             (sbcl-build-boot :image image :command "sbcl" :log-name "17-nfs-check-boot.log"
+                              :memory 3072 :timeout 300 :debug-exit t :network t
+                              :environment (list (format nil "RUMPRUN_NFS_MOUNTS=10.0.2.2:~D:/workspace:/workspace"
+                                                         port))
+                              :markers '("NFS-OK 5 checks" "SBCL-GUEST-EXIT 0")))
+        (uiop:symbol-call :sb-bsd-sockets :socket-close listener)))
+    (unless (and (string= (uiop:read-file-string (merge-pathnames "guest/moved.txt" export))
+                          (format nil "renamed~%"))
+                 (= 200000 (with-open-file (in (merge-pathnames "guest/large.txt" export))
+                             (file-length in)))
+                 (not (probe-file (merge-pathnames "guest/deleted.txt" export))))
+      (error "The guest's NFS writes did not reach the host as written."))))
+
 (defun sbcl-build-defined-symbols (path)
   "Return a hash set of the global symbols the object or archive PATH defines."
   (let ((symbols (make-hash-table :test #'equal)))
@@ -659,6 +709,7 @@ guests, then boot the machine fixture, clock probes, and SBCL smoke guest."
                      :debug-exit t
                      :markers '("LISP-SMOKE-OK 24 checks" "SBCL-GUEST-EXIT 0"))
     (sbcl-build-check-missing-symbols "/build/sbcl-logs/16-sbcl-smoke-boot.log" "/probe/sbcl.bin")
+    (sbcl-build-nfs-check "/build/warm-export/sbcl.core" "/build/contrib-export/foreign-lookups.txt")
     (format t "SBCL rumprun build and guest checks completed.~%")))
 
 (unless (member :sbcl-build-library *features*)

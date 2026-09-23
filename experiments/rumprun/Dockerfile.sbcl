@@ -14,6 +14,8 @@ COPY sbcl-build.lisp /probe/sbcl-build.lisp
 COPY sbcl-configure.lisp /probe/sbcl-configure.lisp
 COPY sbcl-runtime.lisp /probe/sbcl-runtime.lisp
 COPY rumprun-os.c /probe/rumprun-os.c
+COPY rumprun-mounts.c /probe/rumprun-mounts.c
+COPY rumprun-mounts.h /probe/rumprun-mounts.h
 COPY sbcl-link.lisp /probe/sbcl-link.lisp
 COPY sbcl-machine.c /probe/sbcl-machine.c
 COPY sbcl-machine.h /probe/sbcl-machine.h
@@ -27,6 +29,9 @@ COPY sbcl-warm.lisp /probe/sbcl-warm.lisp
 COPY sbcl-contribs.lisp /probe/sbcl-contribs.lisp
 COPY sbcl-grovel-main.c /probe/sbcl-grovel-main.c
 COPY sbcl-smoke.lisp /probe/sbcl-smoke.lisp
+COPY sbcl-nfs-check.lisp /probe/sbcl-nfs-check.lisp
+COPY broker-rpc.lisp /probe/broker-rpc.lisp
+COPY broker-nfs.lisp /probe/broker-nfs.lisp
 
 RUN sbcl --noinform --no-userinit --no-sysinit --disable-debugger \
     --script /probe/sbcl-build.lisp
