@@ -196,18 +196,34 @@ platforms' feature conditionals; those stay unresolved weak references."
 (defparameter *rump-sbcl-nm* "/opt/rumprun/bin/x86_64-rumprun-netbsd-nm"
   "The rumprun toolchain's symbol lister.")
 
-(defun rump-sbcl-archive-symbols (archive)
-  "Return a hash set of the global symbols ARCHIVE defines."
+(defun rump-sbcl-archive-symbols (archive &key (types nil) (required "memcpy"))
+  "Return a hash set of the global symbols ARCHIVE defines, limited to the
+nm type letters in TYPES when given. Fail unless REQUIRED is among them,
+or, when REQUIRED is NIL, unless nm read any symbol."
   (let ((symbols (make-hash-table :test #'equal)))
     (dolist (line (uiop:split-string (uiop:run-program
                                       (list *rump-sbcl-nm* "-g" "--defined-only" archive)
                                       :output ':string)
                                      :separator '(#\Newline)))
       (let ((fields (remove "" (uiop:split-string line :separator '(#\Space)) :test #'string=)))
-        (when (= (length fields) 3)
+        (when (and (= (length fields) 3)
+                   (or (null types) (find (char (second fields) 0) types)))
           (setf (gethash (third fields) symbols) t))))
-    (assert (gethash "memcpy" symbols) () "No libc symbols read from ~A." archive)
+    (assert (if required (gethash required symbols) (plusp (hash-table-count symbols)))
+            () "No symbol ~:[~;~:*~A ~]read from ~A." required archive)
     symbols))
+
+(defun rump-sbcl-library-functions (library)
+  "Return the sorted names of the global functions static LIBRARY defines,
+including weak definitions. Every one is linked, because Lisp may look up
+any of them by name."
+  (let ((names nil))
+    (maphash (lambda (name value)
+               (declare (ignore value))
+               (when (rump-sbcl-c-identifier-p name)
+                 (push name names)))
+             (rump-sbcl-archive-symbols (namestring library) :types "TW" :required nil))
+    (sort names #'string<)))
 
 (defun rump-sbcl-enclosing-open (text position)
   "Return the index of the unmatched opening parenthesis before POSITION, or NIL."
@@ -285,12 +301,14 @@ lines are \"found NAME\" or \"missing NAME\"."
                       (error "Malformed foreign lookup line in ~A: ~S" path line))
                     name))))
 
-(defun rump-sbcl-link-inputs (root &key core script sources tree lookups)
+(defun rump-sbcl-link-inputs (root &key core script sources tree lookups libraries)
   "Generate the static symbol table and embed CORE, SCRIPT, and SOURCES,
 which is :WARM for SBCL's warm-initialization sources, :CONTRIB for contrib
 sources, :TREE for every file below TREE, or :NONE. LOOKUPS
-names the foreign lookup manifest of the guest that saved CORE, if any. Use
-genesis's explicit alien linkage map, never host symbol addresses."
+names the foreign lookup manifest of the guest that saved CORE, if any.
+LIBRARIES are static archives linked into the runtime, in link order, whose
+every function the table exposes. Use genesis's explicit alien linkage map,
+never host symbol addresses."
   (let ((names nil) (inside nil))
     (with-open-file (stream (merge-pathnames "output/cold-sbcl.map" root))
       (loop for line = (read-line stream nil) while line
@@ -305,10 +323,13 @@ genesis's explicit alien linkage map, never host symbol addresses."
                                                  (find character "_"))) name))
                             (pushnew name names :test #'string=))))))))
     (assert (> (length names) 100))
-    ;; Genesis names must link, and so must warm-only names that libc defines,
-    ;; because a weak reference never extracts an archive member. Other
-    ;; warm-only names are weak: absent symbols resolve to NULL and report
-    ;; through the dlsym wrapper when looked up.
+    ;; Genesis names must link, and so must every function of a linked
+    ;; library, which Lisp may look up by any name. Warm-only names that libc
+    ;; defines are strong too, because a weak reference never extracts an
+    ;; archive member. Other warm-only names are weak: absent symbols resolve
+    ;; to NULL and report through the dlsym wrapper when looked up.
+    (dolist (library libraries)
+      (setf names (union names (rump-sbcl-library-functions library) :test #'string=)))
     (let* ((libc (rump-sbcl-archive-symbols *rump-sbcl-libc-archive*))
            (warm (set-difference (remove-duplicates
                                   (append (rump-sbcl-warm-foreign-names root script)
@@ -335,13 +356,21 @@ genesis's explicit alien linkage map, never host symbol addresses."
     (let ((config (merge-pathnames "src/runtime/Config" root)))
       (unless (search "rumprun-symbols.c" (uiop:read-file-string config))
         (with-open-file (out config :direction ':output :if-exists ':append)
-          (format out "~%OS_SRC += rumprun-symbols.c~%ASSEM_SRC += rumprun-core.S~%"))))
+          (format out "~%OS_SRC += rumprun-symbols.c~%ASSEM_SRC += rumprun-core.S~%")))
+      (unless (search "rumprun-libraries.mk" (uiop:read-file-string config))
+        (with-open-file (out config :direction ':output :if-exists ':append)
+          (format out "-include rumprun-libraries.mk~%"))))
+    ;; Each link names its own libraries, so a later guest does not inherit them.
+    (with-open-file (out (merge-pathnames "src/runtime/rumprun-libraries.mk" root)
+                         :direction ':output :if-exists ':supersede)
+      (dolist (library libraries)
+        (format out "OS_LIBS += ~A~%" (namestring library))))
     (format t "Generated ~D static symbol entries.~%" (length names))))
 
 (defun rump-sbcl-link-main (arguments)
   "Parse ROOT --core FILE --script FILE --sources warm|contrib|tree|none
-[--tree DIRECTORY] [--lookups FILE]
-and link."
+[--tree DIRECTORY] [--lookups FILE] [--library ARCHIVE]...
+and link. Repeated --library options keep their order."
   (destructuring-bind (root &rest options) arguments
     (flet ((option (name &optional (required t))
              (let ((tail (member name options :test #'string=)))
@@ -358,6 +387,10 @@ and link."
                              :tree    (let ((tree (option "--tree" nil)))
                                         (and tree (uiop:parse-native-namestring tree)))
                              :lookups (let ((lookups (option "--lookups" nil)))
-                                        (and lookups (uiop:parse-native-namestring lookups)))))))
+                                        (and lookups (uiop:parse-native-namestring lookups)))
+                             :libraries (loop for (name value) on options
+                                              when (string= name "--library")
+                                                collect (uiop:parse-native-namestring
+                                                         (or value (error "Missing --library archive."))))))))
 
 (rump-sbcl-link-main (uiop:command-line-arguments))

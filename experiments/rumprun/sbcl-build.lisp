@@ -323,17 +323,20 @@ EXPORT names the host file that receives the guest's export stream."
                        :log-name (format nil "~A-boot.log" name)
                        :markers '((:prefix "CLOCK-PROBE: "))))))
 
-(defun sbcl-build-sbcl-guest (&key name core script sources tree lookups)
+(defun sbcl-build-sbcl-guest (&key name core script sources tree lookups libraries)
   "Link, compile, and bake the SBCL guest NAME embedding CORE, SCRIPT, and
 SOURCES (\"warm\", \"contrib\", \"tree\" with TREE, or \"none\"). LOOKUPS
 is the foreign lookup manifest of the guest that saved or last booted CORE,
-if any. Return the guest image path."
+if any. LIBRARIES are static archives the runtime links, in order. Return
+the guest image path."
   (let ((image (format nil "/probe/~A.bin" name)))
     (sbcl-build-run-script "sbcl-link.lisp"
                            :arguments (append (list "--core" core "--script" script
                                                     "--sources" sources)
                                               (and tree (list "--tree" tree))
-                                              (and lookups (list "--lookups" lookups)))
+                                              (and lookups (list "--lookups" lookups))
+                                              (loop for library in libraries
+                                                    append (list "--library" library)))
                            :log-name (format nil "~A-link.log" name))
     (sbcl-build-command
      (list "rm" "-f" "src/runtime/sbcl") *sbcl-source-directory*
