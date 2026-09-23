@@ -2,6 +2,20 @@
 
 ;;;; -- Test Entry --
 
+(-> test-platform-random-octets-uuid () null)
+(defun test-platform-random-octets-uuid ()
+  "Test UUID construction sets the version 4 and variant bits in lowercase form."
+  (dolist (case '((0 "00000000-0000-4000-8000-000000000000")
+                  (255 "ffffffff-ffff-4fff-bfff-ffffffffffff")
+                  (171 "abababab-abab-4bab-abab-abababababab")))
+    (destructuring-bind (octet expected) case
+      (test-assert
+       (string= (platform-random-octets->uuid
+                 (make-array 16 :element-type '(unsigned-byte 8) :initial-element octet))
+                expected)
+       "random octets become a version 4 UUID")))
+  nil)
+
 (-> test-configuration-source-platform-reading () null)
 (defun test-configuration-source-platform-reading ()
   "Test the POSIX adapter source reads under each supported platform feature set."

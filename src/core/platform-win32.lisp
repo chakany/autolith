@@ -716,15 +716,8 @@ protocol."
 
 (defmethod platform-unique-identifier ((platform win32-platform))
   "Return a random version 4 UUID string from the system generator."
-  (let ((octets (win32--random-octets 16)))
-    (setf (aref octets 6) (logior #x40 (logand (aref octets 6) #x0F))
-          (aref octets 8) (logior #x80 (logand (aref octets 8) #x3F)))
-    (format nil "~(~{~2,'0X~}-~{~2,'0X~}-~{~2,'0X~}-~{~2,'0X~}-~{~2,'0X~}~)"
-            (coerce (subseq octets 0 4) 'list)
-            (coerce (subseq octets 4 6) 'list)
-            (coerce (subseq octets 6 8) 'list)
-            (coerce (subseq octets 8 10) 'list)
-            (coerce (subseq octets 10 16) 'list))))
+  (declare (ignore platform))
+  (platform-random-octets->uuid (win32--random-octets 16)))
 
 
 ;;;; -- Security --

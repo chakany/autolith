@@ -190,6 +190,20 @@ could be started and :WAIT when its exit could not be observed."))
 
 Signal PLATFORM-CAPABILITY-UNAVAILABLE when the host offers no such source."))
 
+(-> platform-random-octets->uuid ((simple-array (unsigned-byte 8) (16))) string)
+(defun platform-random-octets->uuid (octets)
+  "Return the lowercase version 4 UUID string built from 16 random OCTETS.
+
+Set the version and variant bits in OCTETS as RFC 9562 requires."
+  (setf (aref octets 6) (logior #x40 (logand (aref octets 6) #x0F))
+        (aref octets 8) (logior #x80 (logand (aref octets 8) #x3F)))
+  (format nil "~(~{~2,'0X~}-~{~2,'0X~}-~{~2,'0X~}-~{~2,'0X~}-~{~2,'0X~}~)"
+          (coerce (subseq octets 0 4) 'list)
+          (coerce (subseq octets 4 6) 'list)
+          (coerce (subseq octets 6 8) 'list)
+          (coerce (subseq octets 8 10) 'list)
+          (coerce (subseq octets 10 16) 'list)))
+
 
 ;;;; -- Environment --
 
