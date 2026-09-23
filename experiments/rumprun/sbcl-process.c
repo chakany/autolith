@@ -9,6 +9,7 @@
 #include <sys/types.h>
 #include <sys/resource.h>
 #include <unistd.h>
+#include "sbcl-machine.h"
 
 /* The guest cannot create processes. */
 pid_t __wrap___fork(void)
@@ -23,9 +24,9 @@ pid_t __wrap___vfork14(void)
     return -1;
 }
 
-/* The guest is the only process: it exists and may be probed with signal
- * zero, and every other process does not exist. Process-directed signals
- * are not delivered; pthread_kill reaches threads. */
+/* The guest is the only process: every other process does not exist, and a
+ * signal sent to the guest reaches one of its threads as a kernel would
+ * deliver it. */
 int __wrap_kill(pid_t pid, int signal)
 {
     if (signal < 0 || signal >= NSIG) {
@@ -36,9 +37,7 @@ int __wrap_kill(pid_t pid, int signal)
         errno = ESRCH;
         return -1;
     }
-    if (signal == 0) return 0;
-    errno = ENOTSUP;
-    return -1;
+    return rumprun_raise_process_signal(signal);
 }
 
 /* With no children there is nothing to wait for. */

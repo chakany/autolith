@@ -540,6 +540,57 @@ static void test_processes(void)
     assert(waitpid(-1, &status, 0) == -1 && errno == ECHILD && status == -7);
 }
 
+static volatile int process_signals, process_waiter_ready;
+
+static void process_signal_handler(int signal)
+{
+    (void)signal;
+    ++process_signals;
+}
+
+static void *process_signal_waiter(void *argument)
+{
+    (void)argument;
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    int received = 0;
+    process_waiter_ready = 1;
+    assert(!sigwait(&set, &received));
+    return (void *)(intptr_t)received;
+}
+
+/* kill on the guest's own pid delivers as a kernel would: to a thread that
+ * does not block the signal, to a thread waiting for it in sigwait, or
+ * pending until a thread unblocks it. */
+static void test_process_signals(void)
+{
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = process_signal_handler;
+    assert(!sigaction(SIGUSR2, &action, NULL) && !sigaction(SIGHUP, &action, NULL));
+    sigset_t set, old;
+    sigemptyset(&set);
+    assert(!sigprocmask(SIG_SETMASK, &set, &old));
+    assert(!kill(getpid(), SIGUSR2) && process_signals == 1);
+
+    sigaddset(&set, SIGUSR1);
+    assert(!sigprocmask(SIG_BLOCK, &set, NULL));
+    pthread_t waiter;
+    assert(!pthread_create(&waiter, NULL, process_signal_waiter, NULL));
+    while (!process_waiter_ready) sched_yield();
+    assert(!kill(getpid(), SIGUSR1));
+    void *received;
+    assert(!pthread_join(waiter, &received) && (intptr_t)received == SIGUSR1);
+
+    sigemptyset(&set);
+    sigaddset(&set, SIGHUP);
+    assert(!sigprocmask(SIG_BLOCK, &set, NULL));
+    assert(!kill(getpid(), SIGHUP) && process_signals == 1);
+    assert(!sigprocmask(SIG_UNBLOCK, &set, NULL) && process_signals == 2);
+    assert(!sigprocmask(SIG_SETMASK, &old, NULL));
+}
+
 int main(void)
 {
     rumprun_machine_init();
@@ -618,7 +669,8 @@ int main(void)
     test_lazy_pages(&action);
     test_interrupts();
     test_processes();
+    test_process_signals();
     test_thread_locals();
-    puts("MACHINE-OK: VM ranges/rollback, masks, nested 24KiB stacks, FP preservation/x87/XM vector, unwound handlers, forced traps, threads, thread signals, lazy pages, interrupt entries, processes, thread-local storage");
+    puts("MACHINE-OK: VM ranges/rollback, masks, nested 24KiB stacks, FP preservation/x87/XM vector, unwound handlers, forced traps, threads, thread signals, lazy pages, interrupt entries, processes, process signals, thread-local storage");
     return 0;
 }

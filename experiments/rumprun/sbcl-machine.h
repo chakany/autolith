@@ -20,4 +20,6 @@ void *rumprun_vm_map(void *, size_t);
 int rumprun_vm_unmap(void *, size_t);
 int rumprun_vm_protect(void *, size_t, int);
 void rumprun_machine_init(void);
+/* Deliver a signal sent to the whole guest process, as kill does. */
+int rumprun_raise_process_signal(int);
 #endif

@@ -271,6 +271,7 @@ int __wrap___sigaction14(int signal, const struct sigaction *action,
 }
 
 static int deliver_pending(void);
+static void publish_mask(void);
 
 int __wrap___sigprocmask14(int how, const sigset_t *set, sigset_t *old)
 {
@@ -292,6 +293,7 @@ int __wrap___sigprocmask14(int how, const sigset_t *set, sigset_t *old)
                 else sigdelset(&blocked, signal);
             }
     } else { errno = EINVAL; return -1; }
+    publish_mask();
     /* Unblocking delivers pending signals before returning, as POSIX requires. */
     deliver_pending();
     return 0;
@@ -321,6 +323,8 @@ static struct registered_thread {
     pthread_t thread;
     lwpid_t lwp;                /* 0 until the thread first runs */
     sigset_t pending;
+    sigset_t mask;              /* the thread's mask, for process-directed signals */
+    const sigset_t *waiting;    /* the set it awaits in sigwait, or NULL */
 } threads[THREAD_LIMIT];
 static __thread int delivering_signal;
 
@@ -345,10 +349,20 @@ static struct registered_thread *thread_register(pthread_t thread)
             threads[i].thread = thread;
             threads[i].lwp = 0;
             sigemptyset(&threads[i].pending);
+            sigemptyset(&threads[i].mask);
+            threads[i].waiting = NULL;
             return &threads[i];
         }
     fprintf(stderr, "rumprun: more than %d threads\n", THREAD_LIMIT);
     abort();
+}
+
+/* Publish this thread's mask, which only the thread itself changes, so that
+ * a process-directed signal can find a thread that accepts it. */
+static void publish_mask(void)
+{
+    struct registered_thread *self = thread_record(pthread_self());
+    if (self) self->mask = blocked;
 }
 
 /* Called by each thread when it starts running. */
@@ -403,6 +417,7 @@ static void *thread_trampoline(void *raw)
     free(raw);
     blocked = start.mask; /* A new thread inherits its creator's mask. */
     thread_started();
+    publish_mask();
     void *result = start.function(start.argument);
     thread_unregister();
     return result;
@@ -442,6 +457,29 @@ int __wrap_pthread_kill(pthread_t thread, int signal)
     return 0;
 }
 
+/* Deliver process-directed SIGNAL as a kernel would: to a thread waiting for
+ * it in sigwait, else to a thread that does not block it, else pending on the
+ * initial thread, whose next unblocking or sigwait receives it. */
+int rumprun_raise_process_signal(int signal)
+{
+    if (signal < 0 || signal >= NSIG) { errno = EINVAL; return -1; }
+    if (signal == 0) return 0;
+    struct registered_thread *target = NULL;
+    for (int i = 0; !target && i < THREAD_LIMIT; ++i)
+        if (threads[i].used && threads[i].waiting && sigismember(threads[i].waiting, signal))
+            target = &threads[i];
+    for (int i = 0; !target && i < THREAD_LIMIT; ++i)
+        if (threads[i].used && !sigismember(&threads[i].mask, signal))
+            target = &threads[i];
+    for (int i = 0; !target && i < THREAD_LIMIT; ++i)
+        if (threads[i].used)
+            target = &threads[i];
+    if (!target) { errno = ESRCH; return -1; }
+    int status = __wrap_pthread_kill(target->thread, signal);
+    if (status) { errno = status; return -1; }
+    return 0;
+}
+
 /* libpthread blocks in ___lwp_park60, NetBSD's versioned _lwp_park. Deliver
  * pending signals before and after parking; a delivery interrupts the park,
  * and libpthread resumes its wait. */
@@ -472,11 +510,13 @@ int __wrap_sigwait(const sigset_t *set, int *signal)
 {
     struct registered_thread *self = thread_record(pthread_self());
     if (!self) return EINVAL;
+    self->waiting = set;
     for (;;) {
         deliver_pending();
         for (int number = 1; number < NSIG; ++number)
             if (sigismember(set, number) && sigismember(&self->pending, number)) {
                 sigdelset(&self->pending, number);
+                self->waiting = NULL;
                 *signal = number;
                 return 0;
             }
@@ -664,6 +704,7 @@ struct trap_delivery *rumprun_trap_prepare(uint64_t *frame, void *floating)
     for (int number = 1; number < NSIG; ++number)
         if (sigismember(&action.sa_mask, number)) sigaddset(&blocked, number);
     if (!(action.sa_flags & SA_NODEFER)) sigaddset(&blocked, signal);
+    publish_mask();
     return delivery;
 }
 
@@ -677,6 +718,7 @@ struct resume_block *rumprun_trap_deliver(struct trap_delivery *delivery)
     ucontext_t *context = &delivery->context;
     uint64_t *gregs = context->uc_mcontext.__gregs;
     blocked = context->uc_sigmask;
+    publish_mask();
     for (int i = 0; i < 15; ++i) delivery->resume.registers[i] = gregs[trap_registers[i]];
     delivery->resume.iret[0] = gregs[_REG_RIP];
     delivery->resume.iret[2] = gregs[_REG_RFLAGS];
@@ -758,4 +800,5 @@ void rumprun_machine_init(void)
     __asm__ volatile("mov %0,%%cr4" :: "r"(control) : "memory");
     sigemptyset(&blocked);
     thread_started();
+    publish_mask();
 }
