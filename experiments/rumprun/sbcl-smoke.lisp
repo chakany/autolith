@@ -1,5 +1,4 @@
-;;;; Behavioral checks executed by SBCL inside the rumprun guest.
-(sb-fasl::!warm-load "src/cold/warm.lisp")
+;;;; Behavioral checks executed by warm SBCL inside the rumprun guest.
 (defpackage #:autolith (:use #:cl))
 (in-package #:autolith)
 
@@ -51,6 +50,23 @@
 (with-open-file (input "/core/roundtrip.sexp")
   (let ((*read-eval* nil))
     (check (equal (read input) '("guest data" 42 #\λ)) "guest filesystem and reader")))
+
+;; Contribs built inside the guest load through SBCL_HOME like stock SBCL's.
+(require :asdf)
+(check (uiop:version<= "3.3" (asdf:asdf-version)) "ASDF and UIOP contribs")
+(require :sb-posix)
+(check (and (plusp (sb-posix:getpid))
+            (= (sb-posix:stat-size (sb-posix:stat "/core/roundtrip.sexp"))
+               (with-open-file (input "/core/roundtrip.sexp") (file-length input))))
+       "sb-posix calls and groveled structures")
+(require :sb-bsd-sockets)
+(check (= sockint::af-inet 2) "sb-bsd-sockets groveled constants")
+(require :sb-rotate-byte)
+(check (= (sb-rotate-byte:rotate-byte 1 (byte 8 0) #x81) #x03) "sb-rotate-byte")
+(require :sb-cltl2)
+(check (eq (sb-cltl2:variable-information '*checks*) :special) "sb-cltl2")
+(require :sb-introspect)
+(check (equal (sb-introspect:function-lambda-list #'check) '(value label)) "sb-introspect")
 
 (format t "LISP-SMOKE-OK ~D checks~%" *checks*)
 (sb-ext:exit :code 0)
