@@ -30,8 +30,22 @@
                                                    :error-output        ':output
                                                    :ignore-error-status t)))))
       (unless (member status accepted-statuses :test #'eql)
+        (sbcl-build-print-log-tail log-path)
         (error "Command failed with status ~A; see ~A" status log-path))
       (values status log-path))))
+
+(defparameter *sbcl-log-tail-lines* 40
+  "How many final lines of a failed command's log to print, so that a failure
+inside an image build, whose logs are discarded with the layer, can be
+diagnosed.")
+
+(defun sbcl-build-print-log-tail (log-path)
+  "Print the last *SBCL-LOG-TAIL-LINES* lines of LOG-PATH."
+  (let ((lines (uiop:split-string (uiop:read-file-string log-path :external-format ':latin-1)
+                                  :separator '(#\Newline))))
+    (format t "~&[sbcl-build] End of ~A:~%~{~A~%~}" log-path
+            (last lines *sbcl-log-tail-lines*))
+    (finish-output)))
 
 (defun sbcl-build-download-source (archive)
   "Download and verify the pinned SBCL source archive."
