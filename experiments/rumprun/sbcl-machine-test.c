@@ -524,10 +524,40 @@ static void test_thread_locals(void)
     assert(tls_initialized == 5 && !tls_zeroed[1]);
 }
 
-/* The guest is one process: creating another fails, only the guest itself
- * answers signal zero, and there is never a child to wait for. */
+/* The fixture does not link SBCL's runtime, so this stands in for its
+ * spawn, which the process wrapper reaches when the guest has no broker. */
+static int real_spawn_calls;
+
+int __real_spawn(char *program, char *argv[], int sin, int sout, int serr, int search,
+                 char *envp[], char *pty_name, int channel[2], char *pwd, int *dont_close)
+{
+    (void)program; (void)argv; (void)sin; (void)sout; (void)serr; (void)search;
+    (void)envp; (void)pty_name; (void)channel; (void)pwd; (void)dont_close;
+    ++real_spawn_calls;
+    errno = ENOTSUP;
+    return -1;
+}
+
+int __wrap_spawn(char *, char *[], int, int, int, int, char *[], char *, int[2], char *, int *);
+
+/* Without a broker the guest is one process: creating another fails, only
+ * the guest itself answers signal zero, and there is never a child to wait
+ * for. A missing or malformed broker setting leaves spawning to SBCL. */
 static void test_processes(void)
 {
+    static const char *const malformed[] = {
+        NULL, "", "10.0.2.2", "10.0.2.2:1", "10.0.2.2:1:", "10.0.2.2:0:token",
+        "10.0.2.2:65536:token", "10.0.2.2:port:token", "host:1:token"
+    };
+    char *arguments[] = { "true", NULL };
+    for (size_t i = 0; i < sizeof(malformed) / sizeof(malformed[0]); ++i) {
+        if (malformed[i]) assert(!setenv("RUMPRUN_BROKER", malformed[i], 1));
+        else assert(!unsetenv("RUMPRUN_BROKER"));
+        errno = 0;
+        assert(__wrap_spawn("true", arguments, 0, 1, 2, 1, NULL, NULL, NULL, NULL, NULL) == -1
+               && errno == ENOTSUP && real_spawn_calls == (int)i + 1);
+    }
+    assert(!unsetenv("RUMPRUN_BROKER"));
     errno = 0;
     assert(fork() == -1 && errno == ENOTSUP);
     assert(!kill(getpid(), 0) && !kill(0, 0));

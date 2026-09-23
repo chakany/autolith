@@ -67,7 +67,7 @@ extern void *rumprun_load_core(int, os_vm_offset_t, os_vm_address_t, os_vm_size_
   ;; A failed spawn never reaches wait-for-exec, which closes the exec status
   ;; pipe, so leave it to the error cleanup, which runs after the failure is
   ;; reported: closing it here would reset errno before the report reads it.
-  ;; Every spawn fails in the guest, which cannot create processes.
+  ;; A guest without a broker fails every spawn, since it cannot fork.
   (rump-sbcl-replace root "src/code/run-program.lisp"
                     :before "                                        (unless (minusp child)
                                           (setf child (wait-for-exec child channel))))))))))"
@@ -87,7 +87,7 @@ extern void *rumprun_load_core(int, os_vm_offset_t, os_vm_address_t, os_vm_size_
   (let ((path (merge-pathnames "src/runtime/Config" root)))
     (unless (search "sbcl-machine.c" (uiop:read-file-string path))
       (with-open-file (stream path :direction ':output :if-exists ':append)
-        (format stream "~%OS_SRC += sbcl-machine.c sbcl-clock.c sbcl-process.c rumprun-mounts.c~%ASSEM_SRC += sbcl-traps.S~%CPPFLAGS += -I/build/rumprun/include~%LINKFLAGS += -Wl,--wrap=__sigaction14,--wrap=__sigprocmask14,--wrap=pthread_sigmask,--wrap=__libc_thr_sigsetmask,--wrap=pthread_create,--wrap=pthread_kill,--wrap=sigwait,--wrap=__sigaltstack14,--wrap=dlsym,--wrap=dlopen,--wrap=dlerror,--wrap=exit,--wrap=_exit,--wrap=__clock_gettime50,--wrap=__gettimeofday50~%")))))
+        (format stream "~%OS_SRC += sbcl-machine.c sbcl-clock.c sbcl-process.c rumprun-mounts.c~%ASSEM_SRC += sbcl-traps.S~%CPPFLAGS += -I/build/rumprun/include~%LINKFLAGS += -Wl,--wrap=__sigaction14,--wrap=__sigprocmask14,--wrap=pthread_sigmask,--wrap=__libc_thr_sigsetmask,--wrap=pthread_create,--wrap=pthread_kill,--wrap=sigwait,--wrap=__sigaltstack14,--wrap=dlsym,--wrap=dlopen,--wrap=dlerror,--wrap=exit,--wrap=_exit,--wrap=__clock_gettime50,--wrap=__gettimeofday50,--wrap=spawn~%")))))
 
 (rump-sbcl-adapt-runtime
  (uiop:ensure-directory-pathname
