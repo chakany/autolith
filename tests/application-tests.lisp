@@ -892,6 +892,18 @@
                     (test-assert
                      (eq (application-permission-mode application) ':ask)
                      "once preserves manual permission mode")
+                    (test-assert
+                     (equal (handler-case
+                                (progn
+                                  (application-permissions-command application "sandbox")
+                                  nil)
+                              (configuration-error (condition)
+                                (autolith-error-message condition)))
+                            (platform-command-sandbox-unavailable-message *platform*))
+                     "sandbox mode is refused with the platform's explanation")
+                    (test-assert
+                     (eq (application-permission-mode application) ':ask)
+                     "a refused sandbox mode keeps the permission mode")
                      (test-assert
                       (eq (application--apply-command-authorization-choice
                            application "git log" root "always")

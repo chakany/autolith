@@ -1468,6 +1468,11 @@ can omit. Bounded retries cover handles released just after a child process exit
   "Run COMMAND through native PowerShell in both sandboxed and full-access modes."
   (list "powershell.exe" "-NoProfile" "-NonInteractive" "-Command" command))
 
+(defmethod platform-command-sandbox-unavailable-message ((platform win32-platform))
+  "Explain that the native AppContainer helper is missing."
+  (declare (ignore platform))
+  "The workspace command sandbox is unavailable. On Windows, rebuild or reinstall the native cl-exec-sandbox helper. Sandbox mode is disabled and command approval choices run with full user privileges.")
+
 (defmethod platform-source-check-command ((platform win32-platform) source-root)
   "Run the PowerShell repository check script on Windows."
   (declare (ignore platform))

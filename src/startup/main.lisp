@@ -746,7 +746,7 @@ dependencies."
     (when (and (string-equal (software-type) "Linux")
                (not (application--command-sandbox-available-p)))
       (format *error-output* "~&Autolith: ~A~%"
-              (application--command-sandbox-unavailable-message))
+              (platform-command-sandbox-unavailable-message *platform*))
       (force-output *error-output*))
     (when (main--client-session-p
            :handoff-record handoff-record

@@ -2011,7 +2011,7 @@ are forwarded to TERMINAL-UI-SELECT."
       ((string= choice "sandbox")
        (unless (application--command-sandbox-available-p)
          (error 'configuration-error
-                :message (application--command-sandbox-unavailable-message)))
+                :message (platform-command-sandbox-unavailable-message *platform*)))
        (setf (application-permission-mode application) ':sandboxed)
        (application-present
         application

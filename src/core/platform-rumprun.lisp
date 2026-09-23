@@ -5,9 +5,10 @@
 ;;; Autolith running as a rumprun unikernel guest: one process on NetBSD's
 ;;; libc and a rump kernel. Files, links, permissions, the environment, and
 ;;; local sockets behave as on other POSIX hosts, so this adapter inherits
-;;; the POSIX one. The guest is the only process: it cannot create another,
-;;; fork a saver, or detach from a session, and it reports those
-;;; capabilities as withheld rather than letting the POSIX paths fail.
+;;; the POSIX one. The guest cannot fork: it cannot fork a saver or detach
+;;; from a session, and it reports those capabilities as withheld rather
+;;; than letting the POSIX paths fail. Programs it starts run on the host
+;;; through the host broker, which offers no workspace command sandbox.
 
 (defclass rumprun-platform (posix-platform)
   ()
@@ -58,6 +59,11 @@
   (rumprun--unavailable
    ':forked-image-saver
    "A rumprun guest cannot fork a process that shares this image's heap."))
+
+(defmethod platform-command-sandbox-unavailable-message ((platform rumprun-platform))
+  "Explain that guest commands run on the host through the broker."
+  (declare (ignore platform))
+  "A rumprun guest has no workspace command sandbox. Commands run on the host through the host broker with the broker user's privileges, so sandbox mode is disabled and command approval choices run with full access.")
 
 (-> rumprun--random-octets ((integer 1 256)) (simple-array (unsigned-byte 8) (*)))
 (defun rumprun--random-octets (count)

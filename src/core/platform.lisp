@@ -439,6 +439,11 @@ Own temporary scopes and serialize overlapping host ACL changes until FUNCTION
 returns or unwinds. FUNCTION accepts POLICY and ENVIRONMENT and must wait for
 its command and descendants before returning."))
 
+(defgeneric platform-command-sandbox-unavailable-message (platform)
+  (:documentation
+   "Return an actionable explanation of why this host has no workspace command
+sandbox and how commands run without one."))
+
 (defmethod platform-call-with-command-sandbox ((platform platform) workspace function)
   "Use the whole-host read-only, workspace-write policy on POSIX backends."
   (funcall function

@@ -464,6 +464,11 @@
   "Run COMMAND through the POSIX shell."
   (list "/bin/sh" "-c" command))
 
+(defmethod platform-command-sandbox-unavailable-message ((platform posix-platform))
+  "Explain that a POSIX host lacks the Bubblewrap backend."
+  (declare (ignore platform))
+  "The workspace command sandbox is unavailable. On Linux, install Bubblewrap (the bwrap executable) to provide filesystem and network isolation. Until it is available, sandbox mode is disabled and command approval choices run with full user privileges.")
+
 
 ;;;; -- Local Sockets --
 
