@@ -7,31 +7,47 @@ SBCL 2.6.6 is cross-built for the x86-64 rumprun unikernel and runs under
 QEMU TCG. Guests complete SBCL's warm initialization, save the warm core, and
 build the contribs Autolith needs: ASDF, UIOP, =sb-posix=,
 =sb-bsd-sockets=, =sb-rotate-byte=, =sb-cltl2=, and =sb-introspect=. A guest
-booted from that warm core passes seventeen behavioral checks in seconds:
+booted from that warm core passes 24 behavioral checks in seconds:
 arithmetic, native compilation, compiled and live-redefined definitions, a
 recoverable compiled type error, division by zero, restart invocation, CLOS
 dispatch, repeated full GCs with surviving data, compiled code after GC, a
-guest file round trip including a non-ASCII character, and one check per
-contrib, including calls through =sb-posix= and its groveled structures.
+guest file round trip including a non-ASCII character, seven threading
+checks, and one check per contrib, including calls through =sb-posix= and
+its groveled structures. The threading checks cover joins, mutual exclusion,
+condition variables with and without timeouts, thread-local bindings,
+interrupting a waiting thread, and stop-the-world GC while other threads
+run.
 
-This is an SBCL milestone, not an Autolith port. Autolith has not run in the
-guest; see [[*Autolith][Autolith]] for what loading it found. The work lives entirely in
+On top of that port, a guest compiles and loads Autolith 0.50.3 with its
+117 dependency systems and saves the loaded core, and a second guest booted
+from that core runs Autolith's complete suite: 543 cases and 5,595 checks,
+of which 495 cases pass. Most of the failing cases start a child process,
+which the guest cannot do; see [[*Autolith][Autolith]]. Autolith selects a rumprun
+platform adapter in the guest. The rest of the work lives in
 =experiments/rumprun/= and changes no production runtime. It makes no
 hostile-code containment claim.
 
 * Scope of the port
 
-- One virtual CPU, one Lisp thread, and the =qemu64= CPU model. Threads,
-  futexes, safepoints, immobile space, and core compression are disabled.
-- Only synchronous CPU exceptions reach Lisp: divide error, breakpoint,
-  invalid opcode, general protection, page fault, x87 and SIMD floating
-  point. Asynchronous POSIX signals, timers, and thread interruption are not
-  implemented.
+- One virtual CPU and the =qemu64= CPU model. SBCL runs with =:sb-thread=
+  and =:sb-safepoint= on rumprun's cooperative pthreads; a thread runs until
+  it blocks or yields. Futexes, immobile space, and core compression are
+  disabled.
+- Synchronous CPU exceptions reach Lisp as signals: divide error,
+  breakpoint, invalid opcode, general protection, page fault, x87 and SIMD
+  floating point. Signals sent to a thread with =pthread_kill= reach it at
+  its next park or mask change. There are no timers or process-directed
+  signals.
 - x87 and SSE state is preserved across traps with FXSAVE. AVX state is not,
   so the supported CPU claim stays at =qemu64=, which has no AVX.
 - Foreign code is statically linked. There is no =dlopen= of shared objects.
-- The guest needs 3 GiB of RAM for a 512 MiB Lisp heap, because every 4 KiB
-  page is a separate aligned allocation from the rumprun heap.
+  OpenSSL 3.6.4 is linked into the Autolith guests for =cl+ssl=.
+- The guest is one process. Creating another fails with =ENOTSUP=, only
+  the guest itself answers =kill= with signal zero, and =waitpid= has no
+  children.
+- Guest pages are backed on first use, so RAM bounds the Lisp memory in use
+  rather than the dynamic space reserved. The guest command line =sbcl
+  MEGABYTES= sets the dynamic space size, 512 MiB by default.
 
 * Build stages
 
@@ -68,22 +84,38 @@ All files are in =experiments/rumprun/=.
 | =sbcl-runtime.lisp= | Exact, repeatable source adaptations and linker wraps |
 | =sbcl-link.lisp= | Static foreign symbol table and embedded core, script, and sources |
 | =rumprun-os.c= | Allocator, core loader, static =dlsym=, export channel, and guest entry point |
-| =sbcl-machine.c=, =sbcl-machine.h=, =sbcl-traps.S= | Guest page tables and exception delivery |
+| =sbcl-machine.c=, =sbcl-machine.h=, =sbcl-traps.S= | Guest page tables, exception and interrupt delivery, and signals |
+| =sbcl-process.c= | POSIX failures for rumprun's process stubs |
 | =sbcl-clock.c= | Monotonic clocks for SBCL |
 | =sbcl-warm-compile.lisp=, =sbcl-warm.lisp= | Warm initialization stages |
 | =sbcl-contribs.lisp=, =sbcl-grovel-main.c= | Contrib stages and the grovel program wrapper |
 | =sbcl-smoke.lisp= | The behavioral checks |
 | =sbcl-machine-test.c=, =sbcl-clock-test.c= | Guest fixtures for machine support and clocks |
 | =sbcl-build-test.lisp= | Driver tests, including fail-closed extraction |
+| =autolith-stage.lisp= | Host staging of Autolith and its dependency sources |
+| =Dockerfile.autolith=, =sbcl-autolith-build.lisp= | Autolith image and driver: OpenSSL, the load guest, and the test guest |
+| =sbcl-autolith.lisp=, =sbcl-autolith-tests.lisp= | Guest scripts that load and save Autolith and run its suites |
 
 ** Memory
 
 =sbcl-machine.c= walks the guest's four-level page tables and adds 4 KiB
 mappings above 4 GiB, leaving rumprun's identity map untouched. It enforces
-write protection and NX, zero-fills new pages, invalidates each changed
-translation, and frees pages and emptied tables it owns. SBCL's allocator,
-unmap, and protect calls go through these functions, so guard pages and exact
-remapping behave as SBCL expects.
+write protection and NX, invalidates each changed translation, and frees
+pages and emptied tables it owns. SBCL's allocator, unmap, and protect calls
+go through these functions, so guard pages and exact remapping behave as
+SBCL expects.
+
+A mapping only reserves its range. Page tables are built at once, but each
+page is backed with a zeroed page from bmk's page allocator on its first
+access: the page fault resolves on the trap stack and the faulting
+instruction runs again, with no signal delivered. Protection applies to
+pages not yet backed, so a guard page faults to SBCL as before. Before a
+signal frame is written to a stack, its pages are backed first, because a
+fault while building the frame would reenter the trap stack and overwrite
+the frame being delivered. When no physical page remains, the guest stops
+with a message, as an out-of-memory kill would. A guest therefore needs RAM
+for the pages Lisp touches, not for its whole dynamic space: Autolith loads
+in a 2 GiB dynamic space inside 3 GiB of guest RAM.
 
 ** Traps
 
@@ -93,7 +125,10 @@ converts the frame to a NetBSD =ucontext_t= and =siginfo_t= and calls the
 handler SBCL installed, honoring =sa_mask=, =SA_NODEFER=, and =SA_ONSTACK=.
 It then copies any register or floating-point changes back before =iretq=.
 
-Two properties of this path are load-bearing:
+The CPU writes its frame on the IST, and the stub leaves the IST as soon as
+the delivery record is built, so a handler that blocks leaves the IST free
+for other threads' traps. Four further properties of this path are
+load-bearing:
 
 - The signal frame lives on the handler's stack, below the interrupted red
   zone, as a kernel would place it. SBCL without threads does not visit
@@ -101,11 +136,82 @@ Two properties of this path are load-bearing:
   conservatively scanning the control stack. With the context kept on the IST
   instead, an object referenced only from a register at a GC-triggering trap
   was freed. The resumed code then stored a dangling pointer into the heap.
-- Lisp routinely unwinds out of handlers. Each dispatch records its IST
-  partition and handler stack. A later trap that arrives outside a recorded
-  handler's stack proves that handler was unwound, and its partition is
-  reused. A fixed depth counter leaked a partition per unwind and aborted
-  after three.
+- Lisp routinely unwinds out of handlers. Because no trap state stays on
+  the IST once the handler runs, an unwound handler leaves nothing behind.
+  An earlier design kept each dispatch on its own IST partition and leaked a
+  partition per unwind until it aborted.
+- Signal masks and alternate stacks are per thread; actions are shared. A
+  new thread inherits its creator's mask, which SBCL relies on when it
+  creates threads with signals blocked.
+- A CPU exception whose signal is blocked is delivered anyway, unblocking
+  that signal in the thread's mask, as Linux's =force_sig_info= does. SBCL's
+  safepoint code expects this: it runs interruptions under handler masks
+  that include =SIGTRAP=, and on NetBSD SBCL installs handlers without
+  =SA_NODEFER=.
+
+** Threads
+
+NetBSD's libpthread runs on rumprun's =_lwp= calls, including stacks SBCL
+allocates itself. Rumprun cannot deliver signals, and its =_lwp_kill=
+aborts, so the runtime supplies what SBCL needs:
+
+- =pthread_kill= marks a signal pending in the target thread's registry
+  entry and unparks it. The target runs the handler through the trap path
+  when its =___lwp_park60= returns, as a kernel delivers to a sleeping
+  thread, and libpthread then resumes its wait. A thread that has not run
+  yet, because its creator has not yielded, receives the signal at its
+  first park or mask change.
+- =sigwait= returns a pending signal from its set, or parks until one
+  arrives. SBCL's signal-handling thread depends on it.
+- =pthread_sigmask= reaches the per-thread emulation under both its standard
+  name and =__libc_thr_sigsetmask=, NetBSD's renamed symbol. Lisp's own
+  lookups of wrapped names reach the same wrappers.
+
+Stop-the-world GC uses SBCL's safepoints, which need no signals between
+threads: on one CPU, every thread but the one collecting is parked in a
+foreign call, which counts as a safe point. A thread blocked in a rump kernel
+system call, such as a blocking read, receives a signal only when that call
+returns. The final unikernel link wraps =___lwp_park60= itself, because
+=rumprun-bake= cannot pass linker flags; the driver runs the bake's own
+commands with that flag added.
+
+** Thread-local storage
+
+bmk gives each thread a TLS area as large as the distance from
+=_tdata_start= to =_tbss_end= in rumprun's linker script, placed directly
+below the thread control block. The linker addresses thread-local variables
+below that block by the TLS segment's size rounded up to its alignment.
+With the stock script, padding between an 8-byte-aligned =.tdata= and a
+16-byte-aligned =.tbss= makes the segment 8 bytes larger than bmk's area, so
+every thread-local variable is shifted and the lowest one overwrites the
+area's allocation header. Threads then saw wrong initial values, and freeing
+their TLS failed. The driver links with a copy of the script whose TLS
+sections and bounds are aligned to 16, and fails the link unless the
+bounds span the segment exactly at an alignment bmk provides. The machine
+fixture checks thread-local initial values across threads; with the stock
+script it fails, and the rump kernel panics.
+
+** Interrupts
+
+Rumprun's hardware interrupt entries save only six registers on the
+interrupted stack and call C, which may use the caller-saved and SSE
+registers where interrupted Lisp code keeps live values, and they write
+below the interrupted stack pointer. Every PIC vector instead enters on its
+own interrupt stack, saves all general registers and the FXSAVE state, and
+calls rumprun's recorded handler for the line through a synthesized
+interrupt frame, so rumprun's acknowledgement and wakeup logic runs
+unchanged. A gate rumprun installs later is recorded at the next park.
+
+** Processes
+
+Rumprun's process stubs return =ENOTSUP= as a positive result, which its
+own source marks as incorrect: =fork= appears to create child 86 and =kill=
+appears to reach every process. The final link wraps them so that process
+creation fails with =ENOTSUP=, =kill= reaches only the guest itself, and
+=waitpid= reports no children. SBCL's =run-program= then signals
+=Couldn't fork child process= instead of returning a process that never
+existed. It also leaked its exec status pipe whenever spawning failed; the
+port closes it.
 
 ** Clocks
 
@@ -131,7 +237,7 @@ guest is not a trusted source of these files.
 
 =sbcl-link.lisp= builds a static =dlsym= table. Names from genesis's alien
 linkage map are strong references, so a missing one fails the link. Names
-come from two further places:
+come from four further sources:
 
 - A scan of alien forms in SBCL's and the contribs' sources, including
   symbol-named routines and =with-alien= bindings.
@@ -139,29 +245,65 @@ come from two further places:
   core. The runtime records every name Lisp asks =dlsym= for, and exports the
   list. A saved core resolves its whole linkage table again at startup, so
   these names are exactly what the next guest needs.
+- Every function SBCL's own runtime defines, such as =sb-posix='s
+  =s_isdir=, and every function of a static library linked on request, such
+  as OpenSSL for =cl+ssl=.
+- Every C identifier the embedded Lisp sources contain as a whole string
+  literal that names a function of the system archives: libc, the rump
+  kernel's system call entry points in =librump=, and libpthread. Contribs
+  decide at compile time whether a function exists by looking it up, as
+  =sb-posix= does for =mkdtemp= and =link=, so a function missing from the
+  table when a contrib compiles is missing from it for good.
 
-A name that rumprun's libc defines is strong, because a weak reference never
+A name the system archives define is strong, because a weak reference never
 extracts an archive member. Every other name is weak: one the image does not
 define resolves to NULL, and looking it up reports
 =rumprun: missing static foreign symbol=. After the smoke boot, the driver
 fails if any missing name is one the image or libc defines. The remaining
 misses, such as =getresuid=, are functions rumprun's NetBSD libc lacks.
 
+A lookup reaches the symbol a C caller reaches. NetBSD's headers move
+functions to new ABIs with =__RENAME=, and the table follows every rename
+in the sysroot headers, so =unsetenv= reaches =__unsetenv13=, =readdir=
+=__readdir30=, and =time= =__time50=, rather than the compat entry points
+with old structure layouts. Libc's compat members are never exposed.
+
 * Autolith
 
-A trial guest booted the warm core with the contribs, Autolith's =src/=, and
-its dependencies, then ran =asdf:load-system=. The dependencies came from the
-Nix closure that builds Autolith's =sbcl-with-packages=: 117 source trees,
-about 50 MiB without compiled or native artifacts. That trial is not part of
-the driver, because the closure lives in the host's Nix store, which the
-Docker build cannot reach.
+=autolith-stage.lisp= runs on the host with an SBCL whose ASDF registry
+holds Autolith's dependencies, such as the Nix =sbcl-with-packages=. It
+walks the dependencies of =autolith=, =autolith/tests=, and
+=autolith/release-server=, including feature-conditional ones, and copies
+the 117 source trees they come from, without compiled or native artifacts,
+together with Autolith's own sources. =Dockerfile.autolith= receives that
+stage as a build context, since the Docker build cannot reach the host's
+Nix store, and runs =sbcl-autolith-build.lisp=:
 
-Loading stopped at =bordeaux-threads=, which refuses implementations without
-thread support. That is accurate: Autolith uses threads, and this SBCL has
-=sb-thread= disabled. Forcing the library's feature check would only move the
-failure to the first thread creation. Autolith also depends on facilities a
-unikernel lacks: separate worker processes, =fork= for image saving, and
-shell commands.
+| Stage | Guest runs | Result | Time |
+|-------+------------+--------+------|
+| OpenSSL | Nothing: a host cross-build of pinned OpenSSL 3.6.4 | =libssl.a=, =libcrypto.a= | Under a minute |
+| Load | =sbcl-autolith.lisp= on the warm core with the stage | =autolith.core= | 16 minutes |
+| Suites | =sbcl-autolith-tests.lisp= on that core | Test summary | 12 minutes |
+
+The load guest compiles every dependency and Autolith in a 2 GiB dynamic
+space, registers the loaded systems as immutable so that later loads do not
+recompile them, and saves the image. The suites guest compiles only the
+tests. It runs every case serially in one process; =script/check= normally
+isolates each case in its own process.
+
+In the guest, Autolith's rumprun platform adapter inherits the POSIX
+adapter for files, links, permissions, the environment, and local sockets,
+all of which the rump kernel provides. It generates identifiers from the
+kernel's random number generator instead of running =uuidgen=, and it
+reports detached sessions and the forked image saver as withheld. The test
+fixtures withhold forked children, pseudo-terminals, and the POSIX shell.
+
+Of 543 cases, 495 pass and 48 fail. The failures are almost all child
+processes the guest cannot create: SBCL Lisp workers for =lisp.*=
+operations and recursive inference, =shell.run=, language servers, MCP stdio
+servers, the search worker, the clean replay probe, the source check, and
+tests that start a second SBCL to hold a conversation lease. A few remain
+unexplained, including two that cannot enter terminal input mode.
 
 * Reproduce
 
@@ -182,13 +324,44 @@ driver requires QEMU status 1, which encodes guest status 0. The apt
 packages in the image are not frozen. The build is repeatable from pinned
 sources, not bit-identical.
 
+Then stage Autolith and build and check it in guests:
+
+#+begin_src sh
+sbcl --script experiments/rumprun/autolith-stage.lisp STAGE
+docker build --build-context stage=STAGE \
+  -f experiments/rumprun/Dockerfile.autolith experiments/rumprun
+#+end_src
+
+The OpenSSL archive must match SHA-256
+=9bffaa1ad1e07b354c21bd3324ec02fa15579f45a7d0494b3e74bc449b7333ef=, which
+OpenSSL publishes. The build fails unless the load guest exports exactly
+the saved core and its lookup manifest and the suites guest completes; it
+prints the suite summary without failing on failed cases.
+
+Guests reach the network through a virtio NIC. Rumprun's JSON command line
+configures it, and its DHCP client sets addresses and routes but not the
+resolver, which the guest writes from =RUMPRUN_NAMESERVERS=. Under QEMU
+user networking:
+
+#+begin_src sh
+qemu-system-x86_64 -machine pc,accel=tcg -cpu qemu64 -m 3072 \
+  -vga none -display none -serial stdio -kernel IMAGE \
+  -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+  -append '{"cmdline":"sbcl","env":"RUMPRUN_NAMESERVERS=10.0.2.3","net":{"if":"vioif0","type":"inet","method":"dhcp"}}'
+#+end_src
+
+A guest configured this way resolved a host name and completed an HTTP
+request.
+
 * Next steps
 
-- Decide how Autolith should run in the guest. Threads could come from
-  rumprun's cooperative pthreads with SBCL's safepoint-based stop-the-world,
-  which needs no signals between threads. Workers, image saving, and shell
-  commands need designs that do not assume processes.
-- Decide which authority stays outside the guest, following the trust model
-  in [[file:rump-kernel-exploration.org][the exploration notes]] and the [[file:rump-artifact-channel.org][artifact channel]].
-- Replace per-page heap allocations with a physical page allocator, which
-  would shrink the RAM requirement.
+- Run Lisp workers as separate guests launched and supervised by a host
+  broker, and =shell.run= through that broker in a host sandbox, following
+  the authorization model of the [[file:rump-artifact-channel.org][artifact channel]].
+- Keep provider credentials, terminal ownership, recovery selection, and
+  artifact publication outside the guest, following the trust model in
+  [[file:rump-kernel-exploration.org][the exploration notes]].
+- Attach the terminal over the network, give guests a persistent disk for
+  Autolith's state, and give them a CA bundle for TLS to providers.
+- Save images without =fork=, by saving the heap and having the host
+  restart the guest from it, as Windows does.
