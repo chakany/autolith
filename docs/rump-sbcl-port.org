@@ -3,17 +3,21 @@
 
 * Result
 
-SBCL 2.6.6 is cross-built for the x86-64 rumprun unikernel and boots under
-QEMU TCG. It loads its cold core, completes warm initialization inside the
-guest, and passes eleven behavioral checks: arithmetic, native compilation,
-compiled and live-redefined definitions, a recoverable compiled type error,
-division by zero, restart invocation, CLOS dispatch, repeated full GCs with
-surviving data, compiled code after GC, and a guest file round trip including
-a non-ASCII character. The guest then exits with status 0.
+SBCL 2.6.6 is cross-built for the x86-64 rumprun unikernel and runs under
+QEMU TCG. Guests complete SBCL's warm initialization, save the warm core, and
+build the contribs Autolith needs: ASDF, UIOP, =sb-posix=,
+=sb-bsd-sockets=, =sb-rotate-byte=, =sb-cltl2=, and =sb-introspect=. A guest
+booted from that warm core passes seventeen behavioral checks in seconds:
+arithmetic, native compilation, compiled and live-redefined definitions, a
+recoverable compiled type error, division by zero, restart invocation, CLOS
+dispatch, repeated full GCs with surviving data, compiled code after GC, a
+guest file round trip including a non-ASCII character, and one check per
+contrib, including calls through =sb-posix= and its groveled structures.
 
 This is an SBCL milestone, not an Autolith port. Autolith has not run in the
-guest. The work lives entirely in =experiments/rumprun/= and changes no
-production runtime. It makes no hostile-code containment claim.
+guest; see [[*Autolith][Autolith]] for what loading it found. The work lives entirely in
+=experiments/rumprun/= and changes no production runtime. It makes no
+hostile-code containment claim.
 
 * Scope of the port
 
@@ -29,21 +33,48 @@ production runtime. It makes no hostile-code containment claim.
 - The guest needs 3 GiB of RAM for a 512 MiB Lisp heap, because every 4 KiB
   page is a separate aligned allocation from the rumprun heap.
 
+* Build stages
+
+A guest cannot restart its own process, so each phase that upstream runs as
+a separate SBCL process is a separate guest boot. Guests hand files to the
+host through the [[*Export channel][export channel]].
+
+| Stage | Guest runs | Exports | Time |
+|-------+------------+---------+------|
+| Header grovel | =tools-for-build/grovel-headers.c= | Target header constants, on the console | Seconds |
+| Warm compile | =sbcl-warm-compile.lisp= on the cold core | Warm fasls | 209 s |
+| Warm load | =sbcl-warm.lisp= on the cold core with those fasls | =sbcl.core= | 131 s |
+| Contrib C | =sbcl-contribs.lisp= on the warm core | Grovel C programs | 14 s |
+| Contrib grovel | Each grovel program, via =sbcl-grovel-main.c= | Contrib constants, on the console | Seconds |
+| Contrib build | =sbcl-contribs.lisp= on the warm core with those constants | =sbcl-home/contrib/= | 219 s |
+| Smoke | =sbcl-smoke.lisp= on the warm core with the contribs | Nothing | 8 s |
+
+Times are single runs on the Apple Silicon development host. The warm stages
+follow =make-target-2.sh=: one process compiles the warm sources and a fresh
+one loads the fasls, prunes build-only state with =make-target-2-load.lisp=,
+and saves. The contrib stages follow =contrib/make-contrib.lisp=, except that
+the grovel programs the C compiler would build and run in one process are
+compiled on the host and run as guests of their own. Contribs install in the
+standard =SBCL_HOME= layout, so =require= and ASDF find them as on stock SBCL.
+
 * Components
 
 All files are in =experiments/rumprun/=.
 
 | File | Role |
 |------+------|
-| =Dockerfile.sbcl=, =sbcl-build.lisp= | Build image and driver: pinned download, adaptation, build, and every guest check |
+| =Dockerfile.sbcl=, =sbcl-build.lisp= | Build image and driver: pinned download, every stage, and every guest check |
 | =sbcl-configure.lisp= | Cross configuration without running target probes or Git |
 | =sbcl-runtime.lisp= | Exact, repeatable source adaptations and linker wraps |
-| =sbcl-link.lisp= | Static foreign symbol table and embedded core, script, and warm sources |
-| =rumprun-os.c= | Allocator, core loader, static =dlsym=, and guest entry point |
+| =sbcl-link.lisp= | Static foreign symbol table and embedded core, script, and sources |
+| =rumprun-os.c= | Allocator, core loader, static =dlsym=, export channel, and guest entry point |
 | =sbcl-machine.c=, =sbcl-machine.h=, =sbcl-traps.S= | Guest page tables and exception delivery |
 | =sbcl-clock.c= | Monotonic clocks for SBCL |
-| =sbcl-smoke.lisp= | Warm initialization and the behavioral checks |
+| =sbcl-warm-compile.lisp=, =sbcl-warm.lisp= | Warm initialization stages |
+| =sbcl-contribs.lisp=, =sbcl-grovel-main.c= | Contrib stages and the grovel program wrapper |
+| =sbcl-smoke.lisp= | The behavioral checks |
 | =sbcl-machine-test.c=, =sbcl-clock-test.c= | Guest fixtures for machine support and clocks |
+| =sbcl-build-test.lisp= | Driver tests, including fail-closed extraction |
 
 ** Memory
 
@@ -80,24 +111,57 @@ Two properties of this path are load-bearing:
 
 The NetBSD timecounter in this rumprun build can run backward when no
 scheduler tick intervenes, which made the first warm GC compute a negative
-elapsed time.
-=sbcl-clock.c= wraps =clock_gettime= and =gettimeofday= with rumprun's
-full-width monotonic clock. =sbcl-clock-test.c= reproduces the reversal on
-the native clocks and requires monotonic results from the wrapped ones.
+elapsed time. =sbcl-clock.c= wraps =clock_gettime= and =gettimeofday= with
+rumprun's full-width monotonic clock. =sbcl-clock-test.c= reproduces the
+reversal on the native clocks and requires monotonic results from the
+wrapped ones.
+
+** Export channel
+
+QEMU's =isa-debugcon= device copies every byte written to port =0xe9= into a
+host file. When a guest exits successfully, the runtime streams every
+regular file below =/core/export/= through it, framed with a relative path,
+a length, and an FNV-1a hash. Both C =exit= and Lisp's exit reach this hook.
+The driver refuses a malformed stream, an unsafe or repeated path, a length
+or hash mismatch, or data after the end marker, and checks that each stage
+exported exactly the files it should. The hash detects transport damage; the
+guest is not a trusted source of these files.
 
 ** Foreign symbols
 
 =sbcl-link.lisp= builds a static =dlsym= table. Names from genesis's alien
 linkage map are strong references, so a missing one fails the link. Names
-that warm-loaded sources use are found by scanning alien forms, including
-symbol-named routines and =with-alien= bindings. A warm name that rumprun's
-libc defines is also strong, because a weak reference never extracts an
-archive member. The remaining warm names are weak: one the image does not
+come from two further places:
+
+- A scan of alien forms in SBCL's and the contribs' sources, including
+  symbol-named routines and =with-alien= bindings.
+- The lookup manifest of the guest that saved or last booted the embedded
+  core. The runtime records every name Lisp asks =dlsym= for, and exports the
+  list. A saved core resolves its whole linkage table again at startup, so
+  these names are exactly what the next guest needs.
+
+A name that rumprun's libc defines is strong, because a weak reference never
+extracts an archive member. Every other name is weak: one the image does not
 define resolves to NULL, and looking it up reports
-=rumprun: missing static foreign symbol=. None of the unresolved names exists
-in rumprun's libc. They belong to facilities this build disables, such as
-threads, immobile space, and core compression, or to other platforms and
-architectures.
+=rumprun: missing static foreign symbol=. After the smoke boot, the driver
+fails if any missing name is one the image or libc defines. The remaining
+misses, such as =getresuid=, are functions rumprun's NetBSD libc lacks.
+
+* Autolith
+
+A trial guest booted the warm core with the contribs, Autolith's =src/=, and
+its dependencies, then ran =asdf:load-system=. The dependencies came from the
+Nix closure that builds Autolith's =sbcl-with-packages=: 117 source trees,
+about 50 MiB without compiled or native artifacts. That trial is not part of
+the driver, because the closure lives in the host's Nix store, which the
+Docker build cannot reach.
+
+Loading stopped at =bordeaux-threads=, which refuses implementations without
+thread support. That is accurate: Autolith uses threads, and this SBCL has
+=sb-thread= disabled. Forcing the library's feature check would only move the
+failure to the first thread creation. Autolith also depends on facilities a
+unikernel lacks: separate worker processes, =fork= for image saving, and
+shell commands.
 
 * Reproduce
 
@@ -111,22 +175,19 @@ docker build -f experiments/rumprun/Dockerfile.sbcl \
 
 The build downloads SBCL 2.6.6 source from SourceForge and requires SHA-256
 =a65a7a30812aaf54925d1192b9b9e810f527c79911c6000b7548105aef7da34b=.
-It then boots the header grovel, the machine fixture, both clock fixtures,
-and the SBCL smoke guest, and fails unless each prints its expected marker.
-The SBCL guest reports its exit status through QEMU's =isa-debug-exit=
-device, so the driver requires QEMU status 1, which encodes guest status 0.
-The apt packages in the image are not frozen. The build is repeatable from
-pinned sources, not bit-identical.
-
-On the Apple Silicon development host, the SBCL guest took 288 seconds from
-boot to exit under TCG emulation, most of it warm compilation. The driver
-allows 600.
+It then runs every stage above, the machine fixture, and both clock
+fixtures, and fails unless each prints its expected marker. SBCL guests
+report their exit status through QEMU's =isa-debug-exit= device, so the
+driver requires QEMU status 1, which encodes guest status 0. The apt
+packages in the image are not frozen. The build is repeatable from pinned
+sources, not bit-identical.
 
 * Next steps
 
-- Run Autolith's own system inside the guest. That needs its dependencies
-  loaded in the guest and a design for what worker processes and image saving
-  mean without =fork=.
+- Decide how Autolith should run in the guest. Threads could come from
+  rumprun's cooperative pthreads with SBCL's safepoint-based stop-the-world,
+  which needs no signals between threads. Workers, image saving, and shell
+  commands need designs that do not assume processes.
 - Decide which authority stays outside the guest, following the trust model
   in [[file:rump-kernel-exploration.org][the exploration notes]] and the [[file:rump-artifact-channel.org][artifact channel]].
 - Replace per-page heap allocations with a physical page allocator, which
