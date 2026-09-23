@@ -388,8 +388,7 @@ name and payload reader, and the standard output and error text."
   (let* ((token   "a-secret-token")
          (policy  (make-instance 'broker-host-policy
                                  :directories (list (string-right-trim "/" root))
-                                 :environment (list "PATH=/usr/bin:/bin" "HOME=/tmp")
-                                 :sandbox :none))
+                                 :environment (list "PATH=/usr/bin:/bin" "HOME=/tmp")))
          (service (make-instance 'broker-process-service :token token :policy policy)))
     (multiple-value-bind (listener port) (broker-process-listen service)
       (unwind-protect

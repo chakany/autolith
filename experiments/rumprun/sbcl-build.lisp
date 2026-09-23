@@ -647,8 +647,7 @@ evidence and the program it built."
                                    :policy (make-instance
                                             (uiop:find-symbol* :broker-host-policy :autolith)
                                             :directories (list workspace)
-                                            :environment (sb-ext:posix-environ)
-                                            :sandbox     ':none))))
+                                            :environment (sb-ext:posix-environ)))))
     (sbcl-build-command (list "rm" "-rf" workspace) "/build/" "process-clean.log")
     (ensure-directories-exist (uiop:ensure-directory-pathname workspace))
     (multiple-value-bind (nfs-listener nfs-port)

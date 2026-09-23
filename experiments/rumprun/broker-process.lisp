@@ -92,12 +92,7 @@ which it sees at the same paths.")
     :initform '("PATH" "HOME" "USER" "LOGNAME" "SHELL" "TMPDIR" "SBCL_HOME")
     :reader broker-host-policy-protected
     :documentation "Variables the guest may not override, since they locate
-the host's own tools and files.")
-   (sandbox
-    :initarg :sandbox
-    :reader broker-host-policy-sandbox
-    :documentation "A function from a plan to the plan that runs it inside
-the host sandbox, or :NONE to run plans directly."))
+the host's own tools and files."))
   (:documentation "A policy that runs programs on the host, starting in the
 exported directories."))
 
@@ -273,17 +268,13 @@ except for protected ones and the guest's RUMPRUN_ configuration."
            (names     (mapcar #'broker--variable-name guest))
            (host      (remove-if (lambda (entry)
                                    (member (broker--variable-name entry) names :test #'string=))
-                                 (broker-host-policy-environment policy)))
-           (plan      (make-instance 'broker-process-plan
-                                     :program (broker-process-request-program request)
-                                     :arguments (rest (broker-process-request-arguments request))
-                                     :environment (append host guest)
-                                     :search (broker-process-request-search-p request)
-                                     :directory directory))
-           (sandbox   (broker-host-policy-sandbox policy)))
-      (if (eq sandbox :none)
-          plan
-          (funcall sandbox plan)))))
+                                 (broker-host-policy-environment policy))))
+      (make-instance 'broker-process-plan
+                     :program (broker-process-request-program request)
+                     :arguments (rest (broker-process-request-arguments request))
+                     :environment (append host guest)
+                     :search (broker-process-request-search-p request)
+                     :directory directory))))
 
 
 ;;;; -- Serving --

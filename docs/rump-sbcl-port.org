@@ -355,10 +355,10 @@ default refuses everything. The host policy requires the working directory
 to lie in an exported directory, and starts from the host environment,
 letting the guest override it except for =PATH=, =HOME=, =USER=,
 =LOGNAME=, =SHELL=, =TMPDIR=, and =SBCL_HOME=. The guest's own =RUMPRUN_=
-settings, including its token, never reach the host process. The policy
-passes each plan through a sandbox function before it runs. The token
-authenticates the guest to the broker and protects it from other local
-processes. It is not a containment boundary for programs the guest runs.
+settings, including its token, never reach the host process. Programs
+run directly, with the broker user's rights and the host's tools; the
+broker adds no host sandbox. The token authenticates the guest to the
+broker and protects it from other local processes.
 
 The broker's host tests run with:
 
@@ -424,9 +424,8 @@ request.
 * Next steps
 
 - Run Lisp workers as separate guests launched and supervised by the host
-  broker, and run =shell.run= through its process service in a host
-  sandbox, following the authorization model of the [[file:rump-artifact-channel.org][artifact channel]].
-  Then rerun Autolith's suites in a guest with a broker.
+  broker, and run =shell.run= through its process service. Then rerun
+  Autolith's suites in a guest with a broker.
 - Keep provider credentials, terminal ownership, recovery selection, and
   artifact publication outside the guest, following the trust model in
   [[file:rump-kernel-exploration.org][the exploration notes]].
