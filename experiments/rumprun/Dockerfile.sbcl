@@ -30,8 +30,10 @@ COPY sbcl-contribs.lisp /probe/sbcl-contribs.lisp
 COPY sbcl-grovel-main.c /probe/sbcl-grovel-main.c
 COPY sbcl-smoke.lisp /probe/sbcl-smoke.lisp
 COPY sbcl-nfs-check.lisp /probe/sbcl-nfs-check.lisp
+COPY sbcl-process-check.lisp /probe/sbcl-process-check.lisp
 COPY broker-rpc.lisp /probe/broker-rpc.lisp
 COPY broker-nfs.lisp /probe/broker-nfs.lisp
+COPY broker-process.lisp /probe/broker-process.lisp
 
 RUN sbcl --noinform --no-userinit --no-sysinit --disable-debugger \
     --script /probe/sbcl-build.lisp

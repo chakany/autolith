@@ -632,6 +632,50 @@ evidence and the host-side results of its writes."
                  (not (probe-file (merge-pathnames "guest/deleted.txt" export))))
       (error "The guest's NFS writes did not reach the host as written."))))
 
+(defun sbcl-build-process-check (warm-core lookups)
+  "Serve a host workspace over NFS, at the same path in the guest, and run
+the broker's process service for it, then boot a guest from WARM-CORE that
+runs host programs there, including the host compiler. Require the guest's
+evidence and the program it built."
+  (load "/probe/broker-rpc.lisp")
+  (load "/probe/broker-nfs.lisp")
+  (load "/probe/broker-process.lisp")
+  (let* ((workspace "/build/process-check")
+         (token     (format nil "~36R" (random (expt 2 128) (make-random-state t))))
+         (service   (make-instance (uiop:find-symbol* :broker-process-service :autolith)
+                                   :token  token
+                                   :policy (make-instance
+                                            (uiop:find-symbol* :broker-host-policy :autolith)
+                                            :directories (list workspace)
+                                            :environment (sb-ext:posix-environ)
+                                            :sandbox     ':none))))
+    (sbcl-build-command (list "rm" "-rf" workspace) "/build/" "process-clean.log")
+    (ensure-directories-exist (uiop:ensure-directory-pathname workspace))
+    (multiple-value-bind (nfs-listener nfs-port)
+        (uiop:symbol-call :autolith :nfs-server-listen
+                          (uiop:symbol-call :autolith :nfs-server-create
+                                            (list (list workspace workspace))))
+      (multiple-value-bind (process-listener process-port)
+          (uiop:symbol-call :autolith :broker-process-listen service)
+        (unwind-protect
+             (let ((image (sbcl-build-sbcl-guest :name "process-check" :core warm-core
+                                                 :lookups lookups
+                                                 :script "/probe/sbcl-process-check.lisp"
+                                                 :sources "tree" :tree "/build/smoke-stage/")))
+               (sbcl-build-boot :image image :command "sbcl" :log-name "18-process-check-boot.log"
+                                :memory 3072 :timeout 300 :debug-exit t :network t
+                                :environment (list (format nil "RUMPRUN_NFS_MOUNTS=10.0.2.2:~D:~A:~A"
+                                                           nfs-port workspace workspace)
+                                                   (format nil "RUMPRUN_BROKER=10.0.2.2:~D:~A"
+                                                           process-port token)
+                                                   (format nil "CHECK_WORKSPACE=~A" workspace))
+                                :markers '("PROCESS-OK 10 checks" "SBCL-GUEST-EXIT 0")))
+          (uiop:symbol-call :sb-bsd-sockets :socket-close process-listener)
+          (uiop:symbol-call :sb-bsd-sockets :socket-close nfs-listener))))
+    (unless (= 42 (nth-value 2 (uiop:run-program (list (format nil "~A/answer" workspace))
+                                                 :ignore-error-status t)))
+      (error "The program the guest built does not run on the host."))))
+
 (defun sbcl-build-defined-symbols (path)
   "Return a hash set of the global symbols the object or archive PATH defines."
   (let ((symbols (make-hash-table :test #'equal)))
@@ -710,6 +754,7 @@ guests, then boot the machine fixture, clock probes, and SBCL smoke guest."
                      :markers '("LISP-SMOKE-OK 24 checks" "SBCL-GUEST-EXIT 0"))
     (sbcl-build-check-missing-symbols "/build/sbcl-logs/16-sbcl-smoke-boot.log" "/probe/sbcl.bin")
     (sbcl-build-nfs-check "/build/warm-export/sbcl.core" "/build/contrib-export/foreign-lookups.txt")
+    (sbcl-build-process-check "/build/warm-export/sbcl.core" "/build/contrib-export/foreign-lookups.txt")
     (format t "SBCL rumprun build and guest checks completed.~%")))
 
 (unless (member :sbcl-build-library *features*)
