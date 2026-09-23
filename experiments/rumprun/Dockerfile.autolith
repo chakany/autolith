@@ -1,0 +1,20 @@
+# Autolith built and checked in rumprun guests on the SBCL port image.
+# Stage the sources with autolith-stage.lisp, then build with the stage as
+# the "stage" build context:
+#   docker build --build-context stage=STAGE -f Dockerfile.autolith .
+FROM autolith-rumprun-sbcl:local
+
+USER 0:0
+WORKDIR /build
+
+COPY --from=stage . /build/autolith-stage/
+COPY sbcl-autolith.lisp /probe/sbcl-autolith.lisp
+COPY sbcl-autolith-tests.lisp /probe/sbcl-autolith-tests.lisp
+COPY sbcl-autolith-build.lisp /probe/sbcl-autolith-build.lisp
+
+RUN sbcl --noinform --no-userinit --no-sysinit --disable-debugger \
+    --script /probe/sbcl-autolith-build.lisp
+
+USER 65534:65534
+WORKDIR /probe
+CMD ["sh"]

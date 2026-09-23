@@ -458,14 +458,15 @@ the guest image path."
     (sbcl-build-bake image (namestring (merge-pathnames "src/runtime/sbcl" *sbcl-source-directory*))
                      (format nil "~A-bake.log" name))))
 
-(defun sbcl-build-boot-exporting (&key name image destination)
-  "Boot the SBCL guest IMAGE, require success, and unpack its exports below
-DESTINATION. Return the exported relative paths."
+(defun sbcl-build-boot-exporting (&key name image destination (command "sbcl") (timeout 900))
+  "Boot the SBCL guest IMAGE with guest COMMAND, allowing TIMEOUT seconds,
+require success, and unpack its exports below DESTINATION. Return the
+exported relative paths."
   (let ((capture (format nil "/build/~A-export.bin" name)))
     (uiop:delete-file-if-exists capture)
-    (sbcl-build-boot :image image :command "sbcl"
+    (sbcl-build-boot :image image :command command
                      :log-name (format nil "~A-boot.log" name)
-                     :memory 3072 :timeout 900 :debug-exit t :export capture
+                     :memory 3072 :timeout timeout :debug-exit t :export capture
                      :markers '("SBCL-GUEST-EXIT 0"))
     (sbcl-build-extract-exports capture destination)))
 
