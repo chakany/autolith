@@ -5,6 +5,7 @@
 (require :sb-bsd-sockets)
 (load (merge-pathnames "broker-rpc.lisp" *load-truename*))
 (load (merge-pathnames "broker-nfs.lisp" *load-truename*))
+(load (merge-pathnames "broker-process.lisp" *load-truename*))
 (in-package #:autolith)
 
 (defvar *broker-test-checks* 0
@@ -335,6 +336,137 @@ directory the guest must never reach."
                             *rpc-accept-procedure-unavailable*)
                          "unknown procedures are unavailable"))))
 
+;;;; -- Remote Processes --
+
+(defun broker-test-connect (port)
+  "Return an octet stream connected to the process service on PORT."
+  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type ':stream :protocol ':tcp)))
+    (sb-bsd-sockets:socket-connect socket (sb-bsd-sockets:make-inet-address "127.0.0.1") port)
+    (values (sb-bsd-sockets:socket-make-stream socket :input t :output t
+                                                      :element-type '(unsigned-byte 8)
+                                                      :buffering ':full)
+            socket)))
+
+(defun broker-test-spawn (stream token program arguments &key (environment nil) (directory "")
+                                                               (search nil))
+  "Send a SPAWN frame for PROGRAM with ARGUMENTS on STREAM."
+  (let ((writer (xdr-writer-create)))
+    (xdr-write-string writer token)
+    (xdr-write-string writer program)
+    (xdr-write-unsigned writer (1+ (length arguments)))
+    (xdr-write-string writer program)
+    (dolist (argument arguments) (xdr-write-string writer argument))
+    (xdr-write-unsigned writer (length environment))
+    (dolist (entry environment) (xdr-write-string writer entry))
+    (xdr-write-boolean writer search)
+    (xdr-write-string writer directory)
+    (broker--write-frame stream (sb-thread:make-mutex) :spawn (xdr-writer->octets writer))))
+
+(defun broker-test-frame-name (type)
+  "Return the name of frame TYPE."
+  (loop for (name number) on *broker-frame-types* by #'cddr
+        when (= number type) return name))
+
+(defun broker-test-collect (stream)
+  "Read frames from STREAM until EXIT or FAILED. Return the final frame's
+name and payload reader, and the standard output and error text."
+  (let ((output (make-string-output-stream))
+        (error  (make-string-output-stream)))
+    (loop
+      (multiple-value-bind (type payload) (broker--read-frame stream)
+        (let ((name (and type (broker-test-frame-name type))))
+          (case name
+            (:stdout (write-string (sb-ext:octets-to-string payload :external-format :utf-8) output))
+            (:stderr (write-string (sb-ext:octets-to-string payload :external-format :utf-8) error))
+            ((:exit :failed nil)
+             (return (values name (and payload (xdr-reader-create payload))
+                             (get-output-stream-string output)
+                             (get-output-stream-string error))))))))))
+
+(defun broker-test-processes (root outside)
+  "Check the remote process service with processes starting in ROOT."
+  (let* ((token   "a-secret-token")
+         (policy  (make-instance 'broker-host-policy
+                                 :directories (list (string-right-trim "/" root))
+                                 :environment (list "PATH=/usr/bin:/bin" "HOME=/tmp")
+                                 :sandbox :none))
+         (service (make-instance 'broker-process-service :token token :policy policy)))
+    (multiple-value-bind (listener port) (broker-process-listen service)
+      (unwind-protect
+           (flet ((run (program arguments &rest options &key (use-token token) &allow-other-keys)
+                    (let ((stream (broker-test-connect port)))
+                      (remf options :use-token)
+                      (apply #'broker-test-spawn stream use-token program arguments
+                             :directory root options)
+                      stream)))
+             (multiple-value-bind (name reader) (broker-test-collect (run "/bin/sh" '("-c" "true")
+                                                                          :use-token "wrong"))
+               (broker-test-check (and (eq name :failed) (= (xdr-read-unsigned reader) 1))
+                                  "a request with the wrong token is refused"))
+             (let ((stream (broker-test-connect port)))
+               (broker-test-spawn stream token "/bin/sh" '("-c" "true") :directory outside)
+               (broker-test-check (eq (broker-test-collect stream) :failed)
+                                  "a working directory outside the exports is refused"))
+             (let ((stream (broker-test-connect port)))
+               (broker-test-spawn stream token "/bin/sh" '("-c" "true") :directory
+                                  (concatenate 'string root "/../"))
+               (broker-test-check (eq (broker-test-collect stream) :failed)
+                                  "a working directory escaping through .. is refused"))
+             (multiple-value-bind (name reader) (broker-test-collect (run "/no/such/program" '()))
+               (broker-test-check (and (eq name :failed) (= (xdr-read-unsigned reader) 2))
+                                  "a missing program is reported as missing"))
+             (multiple-value-bind (name reader output error)
+                 (broker-test-collect (run "/bin/sh" '("-c" "printf out; printf err >&2; pwd; exit 3")))
+               (broker-test-check (and (eq name :exit) (= (xdr-read-unsigned reader) 0)
+                                       (= (xdr-read-unsigned reader) 3))
+                                  "an exit code is relayed")
+               (broker-test-check (and (string= error "err")
+                                       (uiop:string-prefix-p "out" output)
+                                       (search (file-namestring (string-right-trim "/" root)) output))
+                                  "standard output and error are relayed, from the working directory"))
+             (let ((stream (run "/bin/cat" '())))
+               (let ((lock (sb-thread:make-mutex)))
+                 (broker--read-frame stream)
+                 (broker--write-frame stream lock :stdin (broker-test-octets "piped input"))
+                 (broker--write-frame stream lock :stdin-eof))
+               (multiple-value-bind (name reader output) (broker-test-collect stream)
+                 (declare (ignore reader))
+                 (broker-test-check (and (eq name :exit) (string= output "piped input"))
+                                    "standard input is relayed until its end")))
+             (let ((stream (run "/bin/sleep" '("30"))))
+               (broker--read-frame stream)
+               (broker--write-frame stream (sb-thread:make-mutex) :signal (broker--words 15 0))
+               (multiple-value-bind (name reader) (broker-test-collect stream)
+                 (broker-test-check (and (eq name :exit) (= (xdr-read-unsigned reader) 1)
+                                         (= (xdr-read-unsigned reader) 15))
+                                    "a guest signal reaches the process, which ends by it")))
+             (multiple-value-bind (name reader output)
+                 (broker-test-collect (run "/bin/sh" '("-c" "printf '%s %s' \"$FOO\" \"$PATH\"")
+                                           :environment '("FOO=bar" "PATH=/guest/bin")))
+               (declare (ignore reader))
+               (broker-test-check (and (eq name :exit) (string= output "bar /usr/bin:/bin"))
+                                  "guest variables pass, but not over protected host ones"))
+             (multiple-value-bind (stream socket) (broker-test-connect port)
+               (broker-test-spawn stream token "/bin/sleep" '("30") :directory root)
+               (multiple-value-bind (type payload) (broker--read-frame stream)
+                 (broker-test-check (eql type (broker--frame-type :started)) "a process starts")
+                 (let ((pid (xdr-read-unsigned (xdr-reader-create payload))))
+                   (sb-bsd-sockets:socket-close socket)
+                   (broker-test-check (loop repeat 100
+                                            thereis (handler-case (progn (sb-posix:kill pid 0) (sleep 0.05) nil)
+                                                      (sb-posix:syscall-error () t)))
+                                      "a process whose guest disconnects is killed")))))
+        (sb-bsd-sockets:socket-close listener))))
+  (let* ((service (make-instance 'broker-process-service :token "t"
+                                                         :policy (make-instance 'broker-refusing-policy))))
+    (multiple-value-bind (listener port) (broker-process-listen service)
+      (unwind-protect
+           (let ((stream (broker-test-connect port)))
+             (broker-test-spawn stream "t" "/bin/sh" '("-c" "true") :directory root)
+             (broker-test-check (eq (broker-test-collect stream) :failed)
+                                "the refusing policy runs nothing"))
+        (sb-bsd-sockets:socket-close listener)))))
+
 (defun broker-test-main ()
   "Run every broker test in fresh temporary directories."
   (let* ((base    (string-right-trim '(#\Newline)
@@ -348,6 +480,7 @@ directory the guest must never reach."
            (sb-posix:mkdir outside #o755)
            (broker-test-rpc)
            (broker-test-nfs-service root outside)
+           (broker-test-processes root outside)
            (format t "BROKER-TEST-OK ~D checks~%" *broker-test-checks*))
       (uiop:run-program (list "rm" "-rf" base)))))
 
