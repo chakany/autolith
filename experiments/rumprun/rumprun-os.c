@@ -287,6 +287,35 @@ static int unpack_sources(void)
     return -1;
 }
 
+/* Rumprun's DHCP client configures addresses and routes but no resolver.
+ * Write /etc/resolv.conf from RUMPRUN_NAMESERVERS, a space-separated list of
+ * IPv4 or IPv6 addresses the host passes in the guest's JSON "env". Refuse
+ * anything else, since the list becomes resolver configuration. Report any
+ * failure and return -1. */
+static int write_resolver(void)
+{
+    const char *list = getenv("RUMPRUN_NAMESERVERS");
+    if (!list) return 0;
+    if (!*list || strlen(list) > 512 || strspn(list, "0123456789abcdefABCDEF.: ") != strlen(list)) {
+        fprintf(stderr, "rumprun: malformed RUMPRUN_NAMESERVERS\n");
+        return -1;
+    }
+    FILE *stream = fopen("/etc/resolv.conf", "w");
+    if (!stream) { perror("rumprun: /etc/resolv.conf"); return -1; }
+    char copy[513];
+    strcpy(copy, list);
+    int count = 0;
+    for (char *token = strtok(copy, " "); token; token = strtok(NULL, " ")) {
+        fprintf(stream, "nameserver %s\n", token);
+        ++count;
+    }
+    if (fclose(stream) || !count) {
+        fprintf(stderr, "rumprun: could not write the nameservers\n");
+        return -1;
+    }
+    return 0;
+}
+
 /* The guest command line is "sbcl [MEGABYTES]", naming the dynamic space size. */
 int main(int argc, char **argv)
 {
@@ -329,6 +358,7 @@ int main(int argc, char **argv)
         || write_guest_file("/core/script.lisp", rumprun_script_start, rumprun_script_end))
         return 1;
     if (chdir("/core") || unpack_sources()) { perror("embedded sources"); return 1; }
+    if (write_resolver()) return 1;
     /* Contribs, when embedded, live in SBCL's standard SBCL_HOME layout. */
     if (setenv("SBCL_HOME", "/core/sbcl-home/", 1)) { perror("SBCL_HOME"); return 1; }
     char *arguments[] = { "sbcl", "--core", "/core/lisp.core", "--noinform",
