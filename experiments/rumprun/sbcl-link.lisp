@@ -304,13 +304,71 @@ table exposes them all at no cost."
           (pushnew (third fields) names :test #'string=))))
     (sort names #'string<)))
 
-(defun rump-sbcl-quoted-system-functions (files)
-  "Return the system functions FILES name as whole string literals."
+(defparameter *rump-sbcl-include-directory* "/opt/rumprun/rumprun-x86_64/include/"
+  "The rumprun sysroot headers that C code in the guest compiles against.")
+
+(defparameter *rump-sbcl-declaration-words*
+  '("void" "int" "char" "short" "long" "signed" "unsigned" "float" "double"
+    "const" "volatile" "struct" "union" "enum")
+  "C words that can directly precede a parenthesis in a declaration without
+being the declared function's name.")
+
+(defun rump-sbcl-identifier-before (text end)
+  "Return the C identifier that ends at END, ignoring whitespace, or NIL."
+  (let* ((last  (position-if-not (lambda (character)
+                                   (member character '(#\Space #\Tab #\Newline #\Return)))
+                                 text :end end :from-end t))
+         (start (and last (position-if-not (lambda (character)
+                                             (or (alphanumericp character) (char= character #\_)))
+                                           text :end (1+ last) :from-end t)))
+         (name  (and last (subseq text (if start (1+ start) 0) (1+ last)))))
+    (and name (rump-sbcl-c-identifier-p name) name)))
+
+(defun rump-sbcl-header-renames ()
+  "Return a hash table from each function name the sysroot headers rename
+with __RENAME to the symbol C callers actually reach, as NetBSD does to move
+a function to a new ABI, such as unsetenv to __unsetenv13."
+  (let ((renames (make-hash-table :test #'equal)))
+    (dolist (file (uiop:directory-files (merge-pathnames "**/" *rump-sbcl-include-directory*)
+                                        "*.h"))
+      ;; Skip dangling links, which no C code can include either.
+      (let ((text (handler-case (uiop:read-file-string file :external-format ':latin-1)
+                    (file-error ()
+                      ""))))
+        (loop for found = (search "__RENAME(" text) then (search "__RENAME(" text :start2 (1+ found))
+              while found
+              do (let* ((target-start (+ found (length "__RENAME(")))
+                        (target-end   (position #\) text :start target-start))
+                        (target       (and target-end (string-trim " " (subseq text target-start
+                                                                          target-end))))
+                        (start        (1+ (or (position-if (lambda (character)
+                                                             (member character '(#\; #\{ #\} #\#)))
+                                                           text :end found :from-end t)
+                                              -1)))
+                        (name         (loop for open = (position #\( text :start start :end found)
+                                              then (position #\( text :start (1+ open) :end found)
+                                            while open
+                                            do (let ((candidate (rump-sbcl-identifier-before
+                                                                 text open)))
+                                                 (when (and candidate
+                                                            (not (member candidate
+                                                                         *rump-sbcl-declaration-words*
+                                                                         :test #'string=)))
+                                                   (return candidate))))))
+                   (when (and name target (rump-sbcl-c-identifier-p target)
+                              (string/= name target))
+                     (setf (gethash name renames) target))))))
+    (assert (equal (gethash "unsetenv" renames) "__unsetenv13") () "Header renames unread.")
+    renames))
+
+(defun rump-sbcl-quoted-system-functions (files renames)
+  "Return the names FILES contain as whole string literals that reach a
+system function, directly or through the header RENAMES."
   (let ((system (rump-sbcl-system-functions))
         (names nil))
     (maphash (lambda (name value)
                (declare (ignore value))
-               (when (gethash name system)
+               (when (gethash (gethash name renames name) system)
                  (push name names)))
              (rump-sbcl-quoted-identifiers files))
     (sort names #'string<)))
@@ -353,24 +411,28 @@ the keyword is not an option of such a binding."
     (assert (member "__sigaction14" names :test #'string=))
     names))
 
-(defun rump-sbcl-symbol-target (name wrapped)
-  "Return the link-time symbol a Lisp lookup of NAME must reach. Lisp calls
-into WRAPPED symbols reach the same wrappers as C callers, and the classic
-signal set operations resolve to NetBSD's current ABI."
-  (cond ((member name wrapped :test #'string=) (concatenate 'string "__wrap_" name))
-        ((string= name "sigaddset") "__sigaddset14")
-        ((string= name "sigdelset") "__sigdelset14")
-        (t name)))
+(defun rump-sbcl-symbol-target (name wrapped renames)
+  "Return the link-time symbol a Lisp lookup of NAME must reach: the symbol
+a C caller reaches through the header RENAMES, such as __sigaddset14 for
+sigaddset, and for WRAPPED symbols the same wrapper C callers reach."
+  (let ((target (gethash name renames name)))
+    (cond ((member name wrapped :test #'string=)
+           (concatenate 'string "__wrap_" name))
+          ((member target wrapped :test #'string=)
+           (concatenate 'string "__wrap_" target))
+          (t
+           target))))
 
-(defun rump-sbcl-write-symbol-table (root names weak)
-  "Write the static dlsym table for NAMES, declaring members of WEAK as weak."
+(defun rump-sbcl-write-symbol-table (root names weak renames)
+  "Write the static dlsym table for NAMES, declaring members of WEAK as weak
+and resolving names through the header RENAMES."
   (let ((wrapped (rump-sbcl-wrapped-symbols root)))
     (with-open-file (out (merge-pathnames "src/runtime/rumprun-symbols.c" root)
                          :direction ':output :if-exists ':supersede)
       (format out "#include <stddef.h>~%#include <string.h>~%")
       (loop for name in names for index from 0
             do (format out "extern char foreign_~D[] __asm__(~S)~:[~; __attribute__((weak))~];~%"
-                       index (rump-sbcl-symbol-target name wrapped)
+                       index (rump-sbcl-symbol-target name wrapped renames)
                        (member name weak :test #'string=)))
       (format out "static const struct { const char *name; void *address; } symbols[] = {~%")
       (loop for name in names for index from 0
@@ -423,24 +485,26 @@ never host symbol addresses."
     (dolist (library libraries)
       (setf names (union names (rump-sbcl-library-functions library) :test #'string=)))
     (let* ((system   (rump-sbcl-system-symbols))
+           (renames  (rump-sbcl-header-renames))
            (quoted   (rump-sbcl-quoted-system-functions
                       (append (list script)
                               (uiop:directory-files (merge-pathnames "src/**/" root) "*.lisp")
                               (uiop:directory-files (merge-pathnames "contrib/**/" root) "*.lisp")
                               (and tree (uiop:directory-files
                                          (merge-pathnames "**/" (uiop:ensure-directory-pathname tree))
-                                         "*.lisp")))))
+                                         "*.lisp")))
+                      renames))
            (warm     (set-difference (remove-duplicates
                                       (append (rump-sbcl-warm-foreign-names root script)
                                               quoted
                                               (and lookups (rump-sbcl-read-lookups lookups)))
                                       :test #'string=)
                                      names :test #'string=))
-           (system-p (lambda (name) (gethash name system)))
+           (system-p (lambda (name) (gethash (gethash name renames name) system)))
            (weak     (remove-if system-p warm)))
       (setf names (append names (remove-if-not system-p warm)))
       (setf names (sort (append names (copy-list weak)) #'string<))
-      (rump-sbcl-write-symbol-table root names weak))
+      (rump-sbcl-write-symbol-table root names weak renames))
     (let ((archive (ecase sources
                      (:warm    (rump-sbcl-source-archive root))
                      (:contrib (rump-sbcl-contrib-archive root))
