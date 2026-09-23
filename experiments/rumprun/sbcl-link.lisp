@@ -233,25 +233,43 @@ the keyword is not an option of such a binding."
     (when (and before (uiop:string-suffix-p before "with-alien"))
       (rump-sbcl-foreign-name-at text (1+ binding) :symbols t))))
 
+(defun rump-sbcl-wrapped-symbols (root)
+  "Return the symbols the runtime link wraps, from its Config's --wrap flags."
+  (let ((text  (uiop:read-file-string (merge-pathnames "src/runtime/Config" root)))
+        (names nil))
+    (loop for start = (search "--wrap=" text) then (search "--wrap=" text :start2 end)
+          for end = (and start (or (position-if (lambda (character)
+                                                  (member character '(#\, #\Space #\Newline)))
+                                                text :start (+ start 7))
+                                   (length text)))
+          while start
+          do (pushnew (subseq text (+ start 7) end) names :test #'string=))
+    (assert (member "__sigaction14" names :test #'string=))
+    names))
+
+(defun rump-sbcl-symbol-target (name wrapped)
+  "Return the link-time symbol a Lisp lookup of NAME must reach. Lisp calls
+into WRAPPED symbols reach the same wrappers as C callers, and the classic
+signal set operations resolve to NetBSD's current ABI."
+  (cond ((member name wrapped :test #'string=) (concatenate 'string "__wrap_" name))
+        ((string= name "sigaddset") "__sigaddset14")
+        ((string= name "sigdelset") "__sigdelset14")
+        (t name)))
+
 (defun rump-sbcl-write-symbol-table (root names weak)
   "Write the static dlsym table for NAMES, declaring members of WEAK as weak."
-  (with-open-file (out (merge-pathnames "src/runtime/rumprun-symbols.c" root)
-                       :direction ':output :if-exists ':supersede)
-    (format out "#include <stddef.h>~%#include <string.h>~%")
-    (loop for name in names for index from 0
-          do (format out "extern char foreign_~D[] __asm__(~S)~:[~; __attribute__((weak))~];~%"
-                     index
-                     ;; Test-harness exits use immediate, flushed QEMU termination.
-                     (cond ((string= name "exit") "__wrap_exit")
-                           ((string= name "_exit") "__wrap__exit")
-                           ((string= name "sigaddset") "__sigaddset14")
-                           ((string= name "sigdelset") "__sigdelset14")
-                           (t name))
-                     (member name weak :test #'string=)))
-    (format out "static const struct { const char *name; void *address; } symbols[] = {~%")
-    (loop for name in names for index from 0
-          do (format out "  {~S, foreign_~D},~%" name index))
-    (format out "};~%void *rumprun_symbol(const char *name) {~%  for (size_t i=0; i<sizeof(symbols)/sizeof(symbols[0]); ++i)~%    if (!strcmp(name, symbols[i].name)) return symbols[i].address;~%  return NULL;~%}~%")
+  (let ((wrapped (rump-sbcl-wrapped-symbols root)))
+    (with-open-file (out (merge-pathnames "src/runtime/rumprun-symbols.c" root)
+                         :direction ':output :if-exists ':supersede)
+      (format out "#include <stddef.h>~%#include <string.h>~%")
+      (loop for name in names for index from 0
+            do (format out "extern char foreign_~D[] __asm__(~S)~:[~; __attribute__((weak))~];~%"
+                       index (rump-sbcl-symbol-target name wrapped)
+                       (member name weak :test #'string=)))
+      (format out "static const struct { const char *name; void *address; } symbols[] = {~%")
+      (loop for name in names for index from 0
+            do (format out "  {~S, foreign_~D},~%" name index))
+      (format out "};~%void *rumprun_symbol(const char *name) {~%  for (size_t i=0; i<sizeof(symbols)/sizeof(symbols[0]); ++i)~%    if (!strcmp(name, symbols[i].name)) return symbols[i].address;~%  return NULL;~%}~%"))
     (format t "Declared ~D warm-only symbols weak.~%" (length weak))))
 
 (defun rump-sbcl-read-lookups (path)
