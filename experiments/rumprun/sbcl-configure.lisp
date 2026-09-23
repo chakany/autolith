@@ -22,7 +22,7 @@
     (assert (search "2.6.6" version))
     (rump-sbcl-write
      root "local-target-features.lisp-expr"
-     (format nil "(lambda (features)~%  (set-difference~%   (union features '(:x86-64 :unix :bsd :netbsd :elf :little-endian~%                     :rumprun :os-provides-blksize-t :os-provides-suseconds-t~%                     :os-provides-clock-gettime~%                     :os-provides-dlopen :sb-simd-pack :sb-simd-pack-256 :avx2~%                     ~A))~%   '(:sb-thread :sb-futex :sb-safepoint :immobile-space :immobile-code~%     :sb-core-compression)))~%" backend))
+     (format nil "(lambda (features)~%  (set-difference~%   (union features '(:x86-64 :unix :bsd :netbsd :elf :little-endian~%                     :rumprun :os-provides-blksize-t :os-provides-suseconds-t~%                     :os-provides-clock-gettime~%                     :os-provides-dlopen :sb-simd-pack :sb-simd-pack-256 :avx2~%                     :sb-thread :sb-safepoint~%                     ~A))~%   '(:sb-futex :immobile-space :immobile-code :sb-core-compression)))~%" backend))
     (rump-sbcl-write root "output/build-config"
                      (format nil "GNUMAKE=make; export GNUMAKE~%SBCL_XC_HOST='sbcl --noinform --no-sysinit --no-userinit --disable-debugger'; export SBCL_XC_HOST~%android=false; export android~%"))
     (rump-sbcl-write root "output/prefix.def" "SBCL_PREFIX=/opt/sbcl-rumprun")
@@ -39,7 +39,7 @@
     (rump-sbcl-write
      root "src/runtime/Config"
      (format nil "include Config.x86-64-bsd~%OS_SRC = bsd-os.c x86-64-bsd-os.c rumprun-os.c~%OS_LIBS =~%CC = /opt/rumprun/bin/x86_64-rumprun-netbsd-gcc~%LINKFLAGS =~%"))
-    (format t "Configured ~A for single-thread x86-64 NetBSD rumprun.~%" root)))
+    (format t "Configured ~A for threaded x86-64 NetBSD rumprun with safepoints.~%" root)))
 
 (rump-sbcl-configure (or (first (uiop:command-line-arguments))
                          (error "Supply the disposable SBCL source directory.")))

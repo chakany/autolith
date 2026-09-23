@@ -63,6 +63,10 @@ extern void *rumprun_load_core(int, os_vm_offset_t, os_vm_address_t, os_vm_size_
                     :before "(native-pathname (sb-alien:extern-alien \"sbcl_runtime\" sb-alien:c-string))"
                     :after "(let ((runtime (sb-alien:extern-alien \"sbcl_runtime\" sb-alien:c-string)))
      (and runtime (native-pathname runtime)))")
+  ;; Safepoints share their POSIX runtime path with Darwin and Linux.
+  (rump-sbcl-replace root "src/cold/shared.lisp"
+                     :before "(and sb-safepoint (not (and (or arm64 x86 x86-64) (or darwin linux win32))))"
+                     :after "(and sb-safepoint (not (and (or arm64 x86 x86-64) (or darwin linux win32 rumprun))))")
   ;; Retain getrusage for CPU accounting independently of elapsed time.
   (dolist (prefix '("#+" "#-"))
     (rump-sbcl-replace root "src/code/unix.lisp"
@@ -71,7 +75,7 @@ extern void *rumprun_load_core(int, os_vm_offset_t, os_vm_address_t, os_vm_size_
   (let ((path (merge-pathnames "src/runtime/Config" root)))
     (unless (search "sbcl-machine.c" (uiop:read-file-string path))
       (with-open-file (stream path :direction ':output :if-exists ':append)
-        (format stream "~%OS_SRC += sbcl-machine.c sbcl-clock.c~%ASSEM_SRC += sbcl-traps.S~%CPPFLAGS += -I/build/rumprun/include~%LINKFLAGS += -Wl,--wrap=__sigaction14,--wrap=__sigprocmask14,--wrap=__sigaltstack14,--wrap=dlsym,--wrap=dlopen,--wrap=dlerror,--wrap=exit,--wrap=_exit,--wrap=__clock_gettime50,--wrap=__gettimeofday50~%")))))
+        (format stream "~%OS_SRC += sbcl-machine.c sbcl-clock.c~%ASSEM_SRC += sbcl-traps.S~%CPPFLAGS += -I/build/rumprun/include~%LINKFLAGS += -Wl,--wrap=__sigaction14,--wrap=__sigprocmask14,--wrap=pthread_sigmask,--wrap=__libc_thr_sigsetmask,--wrap=pthread_create,--wrap=pthread_kill,--wrap=sigwait,--wrap=__sigaltstack14,--wrap=dlsym,--wrap=dlopen,--wrap=dlerror,--wrap=exit,--wrap=_exit,--wrap=__clock_gettime50,--wrap=__gettimeofday50~%")))))
 
 (rump-sbcl-adapt-runtime
  (uiop:ensure-directory-pathname
