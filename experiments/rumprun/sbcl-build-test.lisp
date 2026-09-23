@@ -42,6 +42,12 @@ export extraction."
                                directory "status.log" :accepted-statuses (list status)))))
            (check (sbcl-build-test-error-p
                    (lambda () (sbcl-build-command '("sh" "-c" "exit 7") directory "status.log"))))
+           ;; A failing command keeps the log its error names.
+           (check (sbcl-build-test-error-p
+                   (lambda () (sbcl-build-command '("sh" "-c" "echo diagnosis; exit 3")
+                                                  directory "failed.log"))))
+           (check (search "diagnosis"
+                          (uiop:read-file-string (merge-pathnames "failed.log" directory))))
            (write-log (format nil "MACHINE-OK: checked~C~%=== main() of \"machine-test\" returned 0 ===~C~%"
                               #\Return #\Return))
            (check (not (sbcl-build-validate-guest

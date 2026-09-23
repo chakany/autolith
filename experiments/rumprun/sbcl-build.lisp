@@ -21,17 +21,17 @@
                                     *sbcl-log-directory*))))
     (ensure-directories-exist log-path)
     (format t "~&[sbcl-build] ~{~A~^ ~}~%" arguments)
-    (with-open-file (log log-path :direction ':output :if-exists ':supersede)
-      (multiple-value-bind (ignored-output ignored-error status)
-          (uiop:run-program arguments
-                             :directory directory
-                             :output log
-                             :error-output :output
-                             :ignore-error-status t)
-        (declare (ignore ignored-output ignored-error))
-        (unless (member status accepted-statuses :test #'eql)
-          (error "Command failed with status ~A; see ~A" status log-path))
-        (values status log-path)))))
+    ;; Signal only after the log is closed: unwinding out of WITH-OPEN-FILE
+    ;; aborts the stream, which deletes a newly written log.
+    (let ((status (with-open-file (log log-path :direction ':output :if-exists ':supersede)
+                    (nth-value 2 (uiop:run-program arguments
+                                                   :directory           directory
+                                                   :output              log
+                                                   :error-output        ':output
+                                                   :ignore-error-status t)))))
+      (unless (member status accepted-statuses :test #'eql)
+        (error "Command failed with status ~A; see ~A" status log-path))
+      (values status log-path))))
 
 (defun sbcl-build-download-source (archive)
   "Download and verify the pinned SBCL source archive."
