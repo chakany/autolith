@@ -15,6 +15,7 @@
 #include <dlfcn.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <fs/tmpfs/tmpfs_args.h>
 
 os_vm_address_t os_alloc_gc_space(int space, int attributes,
@@ -295,6 +296,12 @@ int main(int argc, char **argv)
         return 1;
     }
     rumprun_machine_init();
+    /* Rumprun grants 128 descriptors of a larger hard limit, which a Lisp
+     * image with many threads, sockets, and files exhausts. */
+    struct rlimit descriptors;
+    if (getrlimit(RLIMIT_NOFILE, &descriptors)) { perror("descriptor limit"); return 1; }
+    descriptors.rlim_cur = descriptors.rlim_max;
+    if (setrlimit(RLIMIT_NOFILE, &descriptors)) { perror("descriptor limit"); return 1; }
     /* Verify namespace error handling before the first Lisp foreign lookup. */
     if (__wrap_dlerror() || !__wrap_dlopen(NULL, RTLD_NOW) || __wrap_dlerror()
         || !__wrap_dlsym((void *)1, "lisp_init_time") || __wrap_dlerror()
