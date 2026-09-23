@@ -1,4 +1,4 @@
-;;;; Host tests for the broker's RPC and NFS services.
+;;;; Host tests for the broker's RPC, NFS, and process services.
 ;;;; Run with sbcl --script experiments/rumprun/broker-tests.lisp.
 (require :asdf)
 (require :sb-posix)
