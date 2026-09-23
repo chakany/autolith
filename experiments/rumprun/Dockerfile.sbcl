@@ -1,0 +1,33 @@
+# Repeatable SBCL 2.6.6 rumprun port build image from pinned source inputs.
+FROM autolith-rumprun-probe:local
+
+USER 0:0
+
+RUN apt-get -o Acquire::Retries=5 update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y \
+       --no-install-recommends sbcl bzip2 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+COPY sbcl-build.lisp /probe/sbcl-build.lisp
+COPY sbcl-configure.lisp /probe/sbcl-configure.lisp
+COPY sbcl-runtime.lisp /probe/sbcl-runtime.lisp
+COPY rumprun-os.c /probe/rumprun-os.c
+COPY sbcl-link.lisp /probe/sbcl-link.lisp
+COPY sbcl-machine.c /probe/sbcl-machine.c
+COPY sbcl-machine.h /probe/sbcl-machine.h
+COPY sbcl-traps.S /probe/sbcl-traps.S
+COPY sbcl-machine-test.c /probe/sbcl-machine-test.c
+COPY sbcl-clock.c /probe/sbcl-clock.c
+COPY sbcl-clock-test.c /probe/sbcl-clock-test.c
+COPY sbcl-smoke.lisp /probe/sbcl-smoke.lisp
+
+RUN sbcl --noinform --no-userinit --no-sysinit --disable-debugger \
+    --script /probe/sbcl-build.lisp
+
+ENTRYPOINT []
+
+USER 65534:65534
+WORKDIR /probe
+CMD ["sh"]
