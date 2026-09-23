@@ -310,6 +310,12 @@ int main(int argc, char **argv)
     if (mkdir("/core", 0700) || mount(MOUNT_TMPFS, "/core", 0, &tmpfs, sizeof(tmpfs))) {
         perror("private core tmpfs"); return 1;
     }
+    /* Rumprun mounts a 1 MiB /tmp, far too small for Lisp temporary files.
+     * Replace it, while it is still empty, with one as large as /core. */
+    tmpfs.ta_root_mode = 01777;
+    if (unmount("/tmp", 0) || mount(MOUNT_TMPFS, "/tmp", 0, &tmpfs, sizeof(tmpfs))) {
+        perror("temporary tmpfs"); return 1;
+    }
     size_t length = rumprun_core_end - rumprun_core_start;
     printf("SBCL rumprun: embedding %lu core bytes\n", (unsigned long)length);
     if (write_guest_file("/core/lisp.core", rumprun_core_start, rumprun_core_end)
