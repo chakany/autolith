@@ -501,6 +501,11 @@ guests, then boot the machine fixture, clock probes, and SBCL smoke guest."
     (sbcl-build-grovel)
     (sbcl-build-command
      (list "sh" "make-host-2.sh") *sbcl-source-directory* "10-make-host-2.log")
+    ;; Build the runtime objects once, so each guest link can expose every
+    ;; function the runtime defines.
+    (sbcl-build-command
+     (list "env" "RUMPRUN_STUBLINK=succeed" "make" "-j4" "-C" "src/runtime" "sbcl")
+     *sbcl-source-directory* "11-runtime-objects.log")
     (multiple-value-bind (warm-core warm-lookups) (sbcl-build-warm-core)
       (multiple-value-bind (sbcl-home lookups) (sbcl-build-contribs warm-core warm-lookups)
         (sbcl-build-command (list "rm" "-rf" "/build/smoke-stage") "/build/" "smoke-clean.log")

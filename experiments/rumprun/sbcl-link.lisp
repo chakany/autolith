@@ -190,8 +190,12 @@ platforms' feature conditionals; those stay unresolved weak references."
                      (pushnew name names :test #'string=))))))
     names))
 
-(defparameter *rump-sbcl-libc-archive* "/opt/rumprun/rumprun-x86_64/lib/libc.a"
-  "The rumprun libc archive that the final bake links.")
+(defparameter *rump-sbcl-system-archives*
+  '("/opt/rumprun/rumprun-x86_64/lib/libc.a"
+    "/opt/rumprun/rumprun-x86_64/lib/rumprun-hw/librump.a"
+    "/opt/rumprun/rumprun-x86_64/lib/libpthread.a")
+  "The archives the final bake links for the C library interface: libc, the
+rump kernel's system call entry points such as link, and libpthread.")
 
 (defparameter *rump-sbcl-nm* "/opt/rumprun/bin/x86_64-rumprun-netbsd-nm"
   "The rumprun toolchain's symbol lister.")
@@ -225,13 +229,24 @@ any of them by name."
              (rump-sbcl-archive-symbols (namestring library) :types "TW" :required nil))
     (sort names #'string<)))
 
-(defun rump-sbcl-libc-functions ()
-  "Return a hash set of the functions libc defines outside its compat
-members, whose old ABIs conflict with the current definitions."
+(defun rump-sbcl-system-symbols ()
+  "Return a hash set of every global symbol the system archives define."
+  (let ((symbols (make-hash-table :test #'equal)))
+    (dolist (archive *rump-sbcl-system-archives*)
+      (maphash (lambda (name value)
+                 (setf (gethash name symbols) value))
+               (rump-sbcl-archive-symbols archive :required nil)))
+    (assert (and (gethash "memcpy" symbols) (gethash "link" symbols)) ()
+            "System archive symbols unread.")
+    symbols))
+
+(defun rump-sbcl-system-functions ()
+  "Return a hash set of the functions the system archives define outside
+libc's compat members, whose old ABIs conflict with the current definitions."
   (let ((functions (make-hash-table :test #'equal)))
     (dolist (line (uiop:split-string (uiop:run-program
-                                      (list *rump-sbcl-nm* "-A" "-g" "--defined-only"
-                                            *rump-sbcl-libc-archive*)
+                                      (list* *rump-sbcl-nm* "-A" "-g" "--defined-only"
+                                             *rump-sbcl-system-archives*)
                                       :output ':string)
                                      :separator '(#\Newline)))
       (let* ((fields (remove "" (uiop:split-string line :separator '(#\Space)) :test #'string=))
@@ -241,7 +256,8 @@ members, whose old ABIs conflict with the current definitions."
                    (find (char (second fields) 0) "TW")
                    (not (uiop:string-prefix-p "compat" member)))
           (setf (gethash (third fields) functions) t))))
-    (assert (gethash "mkdtemp" functions) () "No libc functions read.")
+    (assert (and (gethash "mkdtemp" functions) (gethash "link" functions)) ()
+            "No system functions read.")
     functions))
 
 (defun rump-sbcl-quoted-identifiers (files)
@@ -266,13 +282,35 @@ keeps a stray quote in a comment or a #\\\" character from hiding names."
                        (setf (gethash name names) t)))))))
     names))
 
-(defun rump-sbcl-quoted-libc-functions (files)
-  "Return the libc functions FILES name as whole string literals."
-  (let ((libc  (rump-sbcl-libc-functions))
+(defun rump-sbcl-runtime-functions (root)
+  "Return the sorted names of the global functions SBCL's own runtime
+objects define, such as sb-posix's s_isdir. They are always linked, so the
+table exposes them all at no cost."
+  (let* ((generated '("rumprun-symbols.o" "rumprun-core.o"))
+         (objects   (remove-if (lambda (object)
+                                 (member (file-namestring object) generated :test #'string=))
+                               (uiop:directory-files (merge-pathnames "src/runtime/" root) "*.o")))
+         (names     nil))
+    (assert objects () "No runtime objects below ~A." root)
+    (dolist (line (uiop:split-string (uiop:run-program
+                                      (list* *rump-sbcl-nm* "-g" "--defined-only"
+                                             (mapcar #'namestring objects))
+                                      :output ':string)
+                                     :separator '(#\Newline)))
+      (let ((fields (remove "" (uiop:split-string line :separator '(#\Space)) :test #'string=)))
+        (when (and (= (length fields) 3)
+                   (find (char (second fields) 0) "TW")
+                   (rump-sbcl-c-identifier-p (third fields)))
+          (pushnew (third fields) names :test #'string=))))
+    (sort names #'string<)))
+
+(defun rump-sbcl-quoted-system-functions (files)
+  "Return the system functions FILES name as whole string literals."
+  (let ((system (rump-sbcl-system-functions))
         (names nil))
     (maphash (lambda (name value)
                (declare (ignore value))
-               (when (gethash name libc)
+               (when (gethash name system)
                  (push name names)))
              (rump-sbcl-quoted-identifiers files))
     (sort names #'string<)))
@@ -375,29 +413,32 @@ never host symbol addresses."
                                                  (find character "_"))) name))
                             (pushnew name names :test #'string=))))))))
     (assert (> (length names) 100))
-    ;; Genesis names must link, and so must every function of a linked
-    ;; library, which Lisp may look up by any name. Warm-only names that libc
-    ;; defines are strong too, because a weak reference never extracts an
-    ;; archive member. Other warm-only names are weak: absent symbols resolve
-    ;; to NULL and report through the dlsym wrapper when looked up.
+    ;; Genesis names must link, and so must every function of the runtime and
+    ;; of a linked library, which Lisp may look up by any name. Warm-only names
+    ;; that the system archives define are strong too, because a weak reference
+    ;; never extracts an archive member. Other warm-only names are weak: absent
+    ;; symbols resolve to NULL and report through the dlsym wrapper when looked
+    ;; up.
+    (setf names (union names (rump-sbcl-runtime-functions root) :test #'string=))
     (dolist (library libraries)
       (setf names (union names (rump-sbcl-library-functions library) :test #'string=)))
-    (let* ((libc   (rump-sbcl-archive-symbols *rump-sbcl-libc-archive*))
-           (quoted (rump-sbcl-quoted-libc-functions
-                    (append (list script)
-                            (uiop:directory-files (merge-pathnames "src/**/" root) "*.lisp")
-                            (uiop:directory-files (merge-pathnames "contrib/**/" root) "*.lisp")
-                            (and tree (uiop:directory-files
-                                       (merge-pathnames "**/" (uiop:ensure-directory-pathname tree))
-                                       "*.lisp")))))
-           (warm (set-difference (remove-duplicates
-                                  (append (rump-sbcl-warm-foreign-names root script)
-                                          quoted
-                                          (and lookups (rump-sbcl-read-lookups lookups)))
-                                  :test #'string=)
-                                 names :test #'string=))
-           (weak (remove-if (lambda (name) (gethash name libc)) warm)))
-      (setf names (append names (remove-if-not (lambda (name) (gethash name libc)) warm)))
+    (let* ((system   (rump-sbcl-system-symbols))
+           (quoted   (rump-sbcl-quoted-system-functions
+                      (append (list script)
+                              (uiop:directory-files (merge-pathnames "src/**/" root) "*.lisp")
+                              (uiop:directory-files (merge-pathnames "contrib/**/" root) "*.lisp")
+                              (and tree (uiop:directory-files
+                                         (merge-pathnames "**/" (uiop:ensure-directory-pathname tree))
+                                         "*.lisp")))))
+           (warm     (set-difference (remove-duplicates
+                                      (append (rump-sbcl-warm-foreign-names root script)
+                                              quoted
+                                              (and lookups (rump-sbcl-read-lookups lookups)))
+                                      :test #'string=)
+                                     names :test #'string=))
+           (system-p (lambda (name) (gethash name system)))
+           (weak     (remove-if system-p warm)))
+      (setf names (append names (remove-if-not system-p warm)))
       (setf names (sort (append names (copy-list weak)) #'string<))
       (rump-sbcl-write-symbol-table root names weak))
     (let ((archive (ecase sources
