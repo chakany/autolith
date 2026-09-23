@@ -225,6 +225,58 @@ any of them by name."
              (rump-sbcl-archive-symbols (namestring library) :types "TW" :required nil))
     (sort names #'string<)))
 
+(defun rump-sbcl-libc-functions ()
+  "Return a hash set of the functions libc defines outside its compat
+members, whose old ABIs conflict with the current definitions."
+  (let ((functions (make-hash-table :test #'equal)))
+    (dolist (line (uiop:split-string (uiop:run-program
+                                      (list *rump-sbcl-nm* "-A" "-g" "--defined-only"
+                                            *rump-sbcl-libc-archive*)
+                                      :output ':string)
+                                     :separator '(#\Newline)))
+      (let* ((fields (remove "" (uiop:split-string line :separator '(#\Space)) :test #'string=))
+             (member (and (= (length fields) 3)
+                          (second (uiop:split-string (first fields) :separator '(#\:))))))
+        (when (and member
+                   (find (char (second fields) 0) "TW")
+                   (not (uiop:string-prefix-p "compat" member)))
+          (setf (gethash (third fields) functions) t))))
+    (assert (gethash "mkdtemp" functions) () "No libc functions read.")
+    functions))
+
+(defun rump-sbcl-quoted-identifiers (files)
+  "Return the C identifiers that FILES contain as whole string literals.
+Foreign interfaces often name C functions this way outside the operators
+the foreign-name scan knows, as sb-posix does when it asks at compile time
+whether mkdtemp exists. Matching only a quote, an identifier, and a quote
+keeps a stray quote in a comment or a #\\\" character from hiding names."
+  (let ((names (make-hash-table :test #'equal)))
+    (dolist (file files)
+      (let ((text (uiop:read-file-string file :external-format ':latin-1)))
+        (loop for start = (position #\" text) then (position #\" text :start end)
+              for end = (and start (or (position-if-not (lambda (character)
+                                                          (or (alphanumericp character)
+                                                              (char= character #\_)))
+                                                        text :start (1+ start))
+                                       (length text)))
+              while start
+              do (when (and (< end (length text)) (char= (char text end) #\"))
+                   (let ((name (subseq text (1+ start) end)))
+                     (when (rump-sbcl-c-identifier-p name)
+                       (setf (gethash name names) t)))))))
+    names))
+
+(defun rump-sbcl-quoted-libc-functions (files)
+  "Return the libc functions FILES name as whole string literals."
+  (let ((libc  (rump-sbcl-libc-functions))
+        (names nil))
+    (maphash (lambda (name value)
+               (declare (ignore value))
+               (when (gethash name libc)
+                 (push name names)))
+             (rump-sbcl-quoted-identifiers files))
+    (sort names #'string<)))
+
 (defun rump-sbcl-enclosing-open (text position)
   "Return the index of the unmatched opening parenthesis before POSITION, or NIL."
   (let ((depth 0))
@@ -330,9 +382,17 @@ never host symbol addresses."
     ;; to NULL and report through the dlsym wrapper when looked up.
     (dolist (library libraries)
       (setf names (union names (rump-sbcl-library-functions library) :test #'string=)))
-    (let* ((libc (rump-sbcl-archive-symbols *rump-sbcl-libc-archive*))
+    (let* ((libc   (rump-sbcl-archive-symbols *rump-sbcl-libc-archive*))
+           (quoted (rump-sbcl-quoted-libc-functions
+                    (append (list script)
+                            (uiop:directory-files (merge-pathnames "src/**/" root) "*.lisp")
+                            (uiop:directory-files (merge-pathnames "contrib/**/" root) "*.lisp")
+                            (and tree (uiop:directory-files
+                                       (merge-pathnames "**/" (uiop:ensure-directory-pathname tree))
+                                       "*.lisp")))))
            (warm (set-difference (remove-duplicates
                                   (append (rump-sbcl-warm-foreign-names root script)
+                                          quoted
                                           (and lookups (rump-sbcl-read-lookups lookups)))
                                   :test #'string=)
                                  names :test #'string=))
