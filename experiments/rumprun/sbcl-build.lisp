@@ -77,9 +77,112 @@
 reference or define them. Other wraps apply earlier, to the runtime's own
 objects.")
 
+(defparameter *sbcl-bake-specs* "/opt/rumprun/rumprun-x86_64/lib/rumprun-hw/specs-bake"
+  "The GCC specs rumprun-bake links unikernel images with.")
+
+(defparameter *sbcl-bake-linker-script* "/opt/rumprun/rumprun-x86_64/lib/hw.ldscript"
+  "The linker script those specs name.")
+
+(defparameter *sbcl-tls-alignment* 16
+  "The TLS alignment bmk's allocator guarantees for a thread's TLS area.")
+
+(defparameter *sbcl-tls-sections*
+  '(("	.tdata : {
+		_tdata_start = . ;
+		*(.tdata)
+		_tdata_end = . ;
+	}" . "	.tdata : ALIGN(16) {
+		_tdata_start = . ;
+		*(.tdata .tdata.*)
+		. = ALIGN(16);
+		_tdata_end = . ;
+	}")
+    ("	.tbss : {
+		_tbss_start = . ;
+		*(.tbss)
+		_tbss_end = . ;
+	}" . "	.tbss : ALIGN(16) {
+		_tbss_start = . ;
+		*(.tbss .tbss.*)
+		. = ALIGN(16);
+		_tbss_end = . ;
+	}"))
+  "Rumprun's TLS sections and their replacements. bmk sizes each thread's
+TLS area as the distance between these bounds and places it directly below
+the thread control block. The linker addresses TLS below that block by the
+segment's size rounded to its alignment, so any padding outside the bounds,
+such as between .tdata and a more aligned .tbss, shifts every thread-local
+variable and lets the lowest one overwrite the area's allocation header.
+Aligning both sections and bounds makes the measured size the segment's.")
+
+(defun sbcl-build-replace-exactly (text before after name)
+  "Return TEXT with its single occurrence of BEFORE replaced by AFTER."
+  (let ((position (search before text)))
+    (unless (and position (not (search before text :start2 (1+ position))))
+      (error "Expected exactly one ~A fragment to replace." name))
+    (concatenate 'string (subseq text 0 position) after
+                 (subseq text (+ position (length before))))))
+
+(defun sbcl-build-tls-specs ()
+  "Write the corrected linker script, and specs naming it, to
+/build/rumprun-link/ and return the specs path."
+  (let* ((directory (uiop:ensure-directory-pathname "/build/rumprun-link/"))
+         (script    (merge-pathnames "hw.ldscript" directory))
+         (specs     (merge-pathnames "specs-bake" directory))
+         (text      (uiop:read-file-string *sbcl-bake-linker-script*)))
+    (ensure-directories-exist directory)
+    (loop for (before . after) in *sbcl-tls-sections*
+          do (setf text (sbcl-build-replace-exactly text before after "TLS section")))
+    (with-open-file (out script :direction ':output :if-exists ':supersede)
+      (write-string text out))
+    (with-open-file (out specs :direction ':output :if-exists ':supersede)
+      (write-string (sbcl-build-replace-exactly
+                     (uiop:read-file-string *sbcl-bake-specs*)
+                     (format nil "-T ~A" *sbcl-bake-linker-script*)
+                     (format nil "-T ~A" (namestring script))
+                     "linker script")
+                    out))
+    (namestring specs)))
+
+(defun sbcl-build-symbol-address (image name)
+  "Return the address of symbol NAME in IMAGE."
+  (let ((line (find-if (lambda (line) (uiop:string-suffix-p line (concatenate 'string " " name)))
+                       (uiop:split-string
+                        (uiop:run-program (list "/opt/rumprun/bin/x86_64-rumprun-netbsd-nm" image)
+                                          :output ':string)
+                        :separator '(#\Newline)))))
+    (unless line
+      (error "~A defines no ~A." image name))
+    (parse-integer line :end (position #\Space line) :radix 16)))
+
+(defun sbcl-build-check-tls (image)
+  "Fail unless bmk's TLS bounds in IMAGE span its TLS segment exactly, with
+no gap between .tdata and .tbss, and the segment's size is a multiple of an
+alignment bmk's TLS areas provide, since the linker rounds it up to that."
+  (let* ((headers (uiop:run-program (list "/opt/rumprun/bin/x86_64-rumprun-netbsd-readelf"
+                                          "-lW" image)
+                                    :output ':string))
+         (line    (find-if (lambda (line) (uiop:string-prefix-p "TLS" (string-left-trim " " line)))
+                           (uiop:split-string headers :separator '(#\Newline))))
+         (fields  (and line (remove "" (uiop:split-string line :separator '(#\Space))
+                                    :test #'string=)))
+         (memory  (and fields (parse-integer (sixth fields) :start 2 :radix 16)))
+         (align   (and fields (parse-integer (first (last fields)) :start 2 :radix 16)))
+         (start   (sbcl-build-symbol-address image "_tdata_start"))
+         (end     (sbcl-build-symbol-address image "_tbss_end")))
+    (unless (and memory align (<= align *sbcl-tls-alignment*)
+                 (zerop (mod memory align))
+                 (= memory (- end start))
+                 (= (sbcl-build-symbol-address image "_tdata_end")
+                    (sbcl-build-symbol-address image "_tbss_start")))
+      (error "~A has a TLS segment of ~A bytes at alignment ~A that bmk's TLS bounds, ~A bytes from _tdata_start to _tbss_end, do not lay out exactly."
+             image memory align (- end start)))
+    image))
+
 (defun sbcl-build-bake (image binary log-name)
   "Bake BINARY into the unikernel IMAGE as rumprun-bake does, adding
-*SBCL-FINAL-WRAPS* to its final link, which rumprun-bake cannot extend."
+*SBCL-FINAL-WRAPS* to its final link, which rumprun-bake cannot extend, and
+linking with the corrected TLS layout, which the result is checked for."
   (let* ((plan     (uiop:run-program (list "/opt/rumprun/bin/rumprun-bake" "-n" "hw_generic"
                                            image binary)
                                      :output ':string :error-output nil))
@@ -95,9 +198,15 @@ objects.")
     (sbcl-build-command (list "sh" "-c" (first commands)) "/build/"
                         (format nil "~A-copy.log" log-name))
     (sbcl-build-command (list "sh" "-c"
-                              (format nil "~A~{ -Wl,--wrap=~A~}" (second commands)
+                              (format nil "~A~{ -Wl,--wrap=~A~}"
+                                      (sbcl-build-replace-exactly
+                                       (second commands)
+                                       (format nil "-specs=~A" *sbcl-bake-specs*)
+                                       (format nil "-specs=~A" (sbcl-build-tls-specs))
+                                       "bake specs")
                                       *sbcl-final-wraps*))
                         "/build/" log-name)
+    (sbcl-build-check-tls image)
     (sbcl-build-command (list "rm" "-rf" (directory-namestring object)) "/build/"
                         (format nil "~A-cleanup.log" log-name))
     image))

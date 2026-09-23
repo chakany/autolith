@@ -497,6 +497,33 @@ static void test_interrupts(void)
     CHECK_INTERRUPT_PRESERVES(39);
 }
 
+/* Thread-local variables start from their initial values in every thread
+ * and keep separate storage. An 8-byte initialized variable followed by a
+ * 16-byte-aligned zeroed one leaves padding between .tdata and .tbss,
+ * which bmk's TLS layout must include. */
+static __thread long tls_initialized = 42;
+static __thread long long tls_zeroed[2] __attribute__((aligned(16)));
+
+static void *tls_thread(void *argument)
+{
+    (void)argument;
+    assert(tls_initialized == 42 && !tls_zeroed[0] && !tls_zeroed[1]);
+    tls_initialized = 7;
+    tls_zeroed[1] = 9;
+    return NULL;
+}
+
+static void test_thread_locals(void)
+{
+    tls_initialized = 5;
+    for (int round = 0; round < 3; ++round) {
+        pthread_t thread;
+        assert(!pthread_create(&thread, NULL, tls_thread, NULL));
+        assert(!pthread_join(thread, NULL));
+    }
+    assert(tls_initialized == 5 && !tls_zeroed[1]);
+}
+
 /* The guest is one process: creating another fails, only the guest itself
  * answers signal zero, and there is never a child to wait for. */
 static void test_processes(void)
@@ -591,6 +618,7 @@ int main(void)
     test_lazy_pages(&action);
     test_interrupts();
     test_processes();
-    puts("MACHINE-OK: VM ranges/rollback, masks, nested 24KiB stacks, FP preservation/x87/XM vector, unwound handlers, forced traps, threads, thread signals, lazy pages, interrupt entries, processes");
+    test_thread_locals();
+    puts("MACHINE-OK: VM ranges/rollback, masks, nested 24KiB stacks, FP preservation/x87/XM vector, unwound handlers, forced traps, threads, thread signals, lazy pages, interrupt entries, processes, thread-local storage");
     return 0;
 }
