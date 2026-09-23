@@ -1,4 +1,4 @@
-/* Single-vCPU, single-Lisp-thread machine support for the pinned rumprun guest.
+/* Single-vCPU machine support for the pinned rumprun guest.
  * Page tables and physical pages belong to this guest, not the host broker. */
 #include "sbcl-machine.h"
 #include <stdint.h>
@@ -9,6 +9,8 @@
 #include <signal.h>
 #include <ucontext.h>
 #include <sys/mman.h>
+#include <pthread.h>
+#include <lwp.h>
 
 #define PAGE 4096UL
 #define PHYSICAL_MASK 0x000ffffffffff000UL
@@ -16,12 +18,12 @@
 #define OWNED (1UL << 9)
 #define VM_START (1UL << 32)
 #define VM_END (1UL << 47)
-#define TRAP_PARTITION 65536UL
 static uintptr_t next_virtual = 0x2000000000UL;
 static struct sigaction actions[NSIG];
-static sigset_t blocked;
-static stack_t alternate = { .ss_flags = SS_DISABLE };
-static unsigned char trap_stack[262144] __attribute__((aligned(16)));
+/* Signal masks and alternate stacks are per thread; actions are shared. */
+static __thread sigset_t blocked;
+static __thread stack_t alternate = { .ss_flags = SS_DISABLE };
+static unsigned char trap_stack[65536] __attribute__((aligned(16)));
 static unsigned char task_state[104] __attribute__((aligned(16)));
 static unsigned char emergency_stacks[2][8192] __attribute__((aligned(16)));
 static uint64_t *exception_ist;
@@ -43,7 +45,7 @@ static void install_gate(unsigned vector, void (*handler)(void))
 }
 extern void rumprun_trap_0(void), rumprun_trap_3(void), rumprun_trap_6(void);
 extern void rumprun_trap_13(void), rumprun_trap_14(void), rumprun_trap_16(void);
-extern void rumprun_trap_19(void);
+extern void rumprun_trap_19(void), rumprun_trap_130(void);
 
 static void *page_allocate(void)
 {
@@ -105,6 +107,13 @@ static void prune_tables(uintptr_t address)
     }
 }
 
+/* Round LENGTH up to whole pages as munmap and mprotect do, or return 0 when
+ * it cannot be represented. */
+static size_t page_round(size_t length)
+{
+    return length > SIZE_MAX - (PAGE-1) ? 0 : (length + PAGE-1) & ~(PAGE-1);
+}
+
 static int valid_range(uintptr_t address, size_t length)
 {
     return address >= VM_START && address < VM_END
@@ -141,6 +150,7 @@ void *rumprun_vm_map(void *requested, size_t length)
 int rumprun_vm_unmap(void *base, size_t length)
 {
     uintptr_t address = (uintptr_t)base;
+    length = page_round(length);
     if (!valid_range(address, length)) return -1;
     for (size_t offset = 0; offset < length; offset += PAGE) {
         uint64_t *entry = page_entry(address + offset, 0);
@@ -163,6 +173,7 @@ int rumprun_vm_unmap(void *base, size_t length)
 int rumprun_vm_protect(void *base, size_t length, int protection)
 {
     uintptr_t address = (uintptr_t)base;
+    length = page_round(length);
     if (!valid_range(address, length)
         || (protection & ~(PROT_READ|PROT_WRITE|PROT_EXEC))) return -1;
     for (size_t offset = 0; offset < length; offset += PAGE) {
@@ -192,6 +203,8 @@ int __wrap___sigaction14(int signal, const struct sigaction *action,
     return 0;
 }
 
+static int deliver_pending(void);
+
 int __wrap___sigprocmask14(int how, const sigset_t *set, sigset_t *old)
 {
     sigset_t copy;
@@ -212,7 +225,195 @@ int __wrap___sigprocmask14(int how, const sigset_t *set, sigset_t *old)
                 else sigdelset(&blocked, signal);
             }
     } else { errno = EINVAL; return -1; }
+    /* Unblocking delivers pending signals before returning, as POSIX requires. */
+    deliver_pending();
     return 0;
+}
+
+/* NetBSD's libpthread implements this with the raw system call, which
+ * rumprun ignores; route it to the same per-thread emulation. Its headers
+ * rename C references to __libc_thr_sigsetmask, while Lisp looks up the
+ * standard name, so both reach this function. */
+int __wrap___libc_thr_sigsetmask(int how, const sigset_t *set, sigset_t *old)
+{
+    return __wrap___sigprocmask14(how, set, old) ? errno : 0;
+}
+
+int __wrap_pthread_sigmask(int how, const sigset_t *set, sigset_t *old)
+{
+    return __wrap___libc_thr_sigsetmask(how, set, old);
+}
+
+/* Threads are registered with their LWP and pending signals so other
+ * threads can signal them. Rumprun's scheduler is cooperative, so this table
+ * changes only between the scheduling points of the threads it names. */
+#define THREAD_LIMIT 256
+#define SIGNAL_VECTOR 0x82
+static struct registered_thread {
+    int used;
+    pthread_t thread;
+    lwpid_t lwp;                /* 0 until the thread first runs */
+    sigset_t pending;
+} threads[THREAD_LIMIT];
+static __thread int delivering_signal;
+
+static struct registered_thread *thread_record(pthread_t thread)
+{
+    for (int i = 0; i < THREAD_LIMIT; ++i)
+        if (threads[i].used && pthread_equal(threads[i].thread, thread))
+            return &threads[i];
+    return NULL;
+}
+
+/* Record THREAD, whichever of its creator and itself runs first. A new
+ * thread does not run until its creator yields, but it may already be
+ * signalled. */
+static struct registered_thread *thread_register(pthread_t thread)
+{
+    struct registered_thread *record = thread_record(thread);
+    if (record) return record;
+    for (int i = 0; i < THREAD_LIMIT; ++i)
+        if (!threads[i].used) {
+            threads[i].used = 1;
+            threads[i].thread = thread;
+            threads[i].lwp = 0;
+            sigemptyset(&threads[i].pending);
+            return &threads[i];
+        }
+    fprintf(stderr, "rumprun: more than %d threads\n", THREAD_LIMIT);
+    abort();
+}
+
+/* Called by each thread when it starts running. */
+static void thread_started(void)
+{
+    thread_register(pthread_self())->lwp = _lwp_self();
+}
+
+static void thread_unregister(void)
+{
+    struct registered_thread *self = thread_record(pthread_self());
+    if (self) self->used = 0;
+}
+
+/* Signals whose default action is to ignore them. */
+static int default_ignored_p(int signal)
+{
+    return signal == SIGURG || signal == SIGCHLD || signal == SIGWINCH || signal == SIGINFO;
+}
+
+/* Deliver this thread's pending, unblocked signals through the trap path,
+ * so each handler receives a real context of the interrupted code. Return
+ * how many handlers ran. */
+static int deliver_pending(void)
+{
+    struct registered_thread *self = thread_record(pthread_self());
+    int delivered = 0;
+    for (int signal = 1; self && signal < NSIG; ++signal) {
+        if (!sigismember(&self->pending, signal) || sigismember(&blocked, signal)) continue;
+        sigdelset(&self->pending, signal);
+        struct sigaction action = actions[signal];
+        if (action.sa_handler == SIG_IGN
+            || (action.sa_handler == SIG_DFL && default_ignored_p(signal)))
+            continue;
+        if (action.sa_handler == SIG_DFL) {
+            fprintf(stderr, "RUMPRUN fatal signal %d with its default action\n", signal);
+            abort();
+        }
+        delivering_signal = signal;
+        __asm__ volatile("int %0" :: "i"(SIGNAL_VECTOR) : "memory");
+        ++delivered;
+        signal = 0; /* A handler may change the mask or raise more signals. */
+    }
+    return delivered;
+}
+
+struct thread_start { void *(*function)(void *); void *argument; sigset_t mask; };
+
+static void *thread_trampoline(void *raw)
+{
+    struct thread_start start = *(struct thread_start *)raw;
+    free(raw);
+    blocked = start.mask; /* A new thread inherits its creator's mask. */
+    thread_started();
+    void *result = start.function(start.argument);
+    thread_unregister();
+    return result;
+}
+
+extern int __real_pthread_create(pthread_t *, const pthread_attr_t *,
+                                 void *(*)(void *), void *);
+int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attributes,
+                          void *(*function)(void *), void *argument)
+{
+    struct thread_start *start = malloc(sizeof(*start));
+    if (!start) return EAGAIN;
+    *start = (struct thread_start){ function, argument, blocked };
+    int status = __real_pthread_create(thread, attributes, thread_trampoline, start);
+    if (status)
+        free(start);
+    else
+        thread_register(*thread);
+    return status;
+}
+
+/* Rumprun never delivers signals, and its _lwp_kill aborts. Mark the signal
+ * pending and wake the target from any park; it runs the handler when its
+ * park returns, as a kernel delivers to a sleeping thread. A thread that has
+ * not run yet receives it at its first park or mask change. */
+int __wrap_pthread_kill(pthread_t thread, int signal)
+{
+    struct registered_thread *target = thread_record(thread);
+    if (!target) return ESRCH;
+    if (signal == 0) return 0;
+    if (signal < 0 || signal >= NSIG) return EINVAL;
+    sigaddset(&target->pending, signal);
+    if (pthread_equal(thread, pthread_self()))
+        deliver_pending();
+    else if (target->lwp)
+        _lwp_unpark(target->lwp, NULL); /* Otherwise it has yet to run. */
+    return 0;
+}
+
+/* libpthread blocks in ___lwp_park60, NetBSD's versioned _lwp_park. Deliver
+ * pending signals before and after parking; a delivery interrupts the park,
+ * and libpthread resumes its wait. */
+extern int __real____lwp_park60(clockid_t, int, const struct timespec *, lwpid_t,
+                                const void *, const void *);
+int __wrap____lwp_park60(clockid_t clock, int flags, const struct timespec *timeout,
+                         lwpid_t unpark, const void *hint, const void *unpark_hint)
+{
+    if (deliver_pending()) {
+        if (unpark) _lwp_unpark(unpark, unpark_hint);
+        errno = EINTR;
+        return -1;
+    }
+    int result = __real____lwp_park60(clock, flags, timeout, unpark, hint, unpark_hint);
+    if (deliver_pending() && result == 0) {
+        errno = EINTR;
+        result = -1;
+    }
+    return result;
+}
+
+/* Wait for a signal in SET pending for this thread. The caller blocks SET,
+ * so ordinary delivery leaves those signals for this call. Nothing between
+ * the last pending check and the park can reschedule, so pthread_kill's
+ * wakeup cannot be lost on this cooperative scheduler. */
+int __wrap_sigwait(const sigset_t *set, int *signal)
+{
+    struct registered_thread *self = thread_record(pthread_self());
+    if (!self) return EINVAL;
+    for (;;) {
+        deliver_pending();
+        for (int number = 1; number < NSIG; ++number)
+            if (sigismember(set, number) && sigismember(&self->pending, number)) {
+                sigdelset(&self->pending, number);
+                *signal = number;
+                return 0;
+            }
+        __real____lwp_park60(CLOCK_MONOTONIC, 0, NULL, 0, NULL, NULL);
+    }
 }
 
 static int on_alternate(uintptr_t pointer)
@@ -222,8 +423,6 @@ static int on_alternate(uintptr_t pointer)
         && pointer - base < alternate.ss_size;
 }
 
-/* The assembly bridge preserves the IST continuation on its original stack. */
-extern void rumprun_call_handler(uintptr_t, void (*)(int), int, siginfo_t *, ucontext_t *);
 int __wrap___sigaltstack14(const stack_t *stack, stack_t *old)
 {
     stack_t copy;
@@ -266,95 +465,86 @@ static int floating_code(int vector, const void *floating)
     if (pending & 32) return FPE_FLTRES;
     return FPE_FLTINV;
 }
-#define TRAP_PARTITIONS (sizeof(trap_stack) / TRAP_PARTITION)
-/* A dispatch is live until its handler returns. Lisp routinely unwinds out
- * of handlers, so liveness is also judged from where the next trap arrives. */
-struct dispatch { unsigned partition; uintptr_t handler_top; int alternate; };
-static struct dispatch dispatches[TRAP_PARTITIONS];
-static unsigned live_dispatches;
+/* The trap stub saves the interrupted state on the IST, then prepare lays a
+ * delivery record on the target stack, as a kernel builds a signal frame.
+ * The stub moves to that stack at once, so the IST is free again for the
+ * next trap from any thread, and handlers may block, nest, or be unwound.
+ * Afterwards the stub restores the resume block and IRETQs from there. */
+struct resume_block {
+    unsigned char floating[512] __attribute__((aligned(16)));
+    uint64_t registers[15];     /* r15..rax, the stub's pop order */
+    uint64_t iret[5];           /* RIP, CS, RFLAGS, RSP, SS */
+};
 
-static uintptr_t partition_top(unsigned partition)
+struct trap_delivery {
+    struct resume_block resume; /* first: the stub restores from here */
+    void (*handler)(int, siginfo_t *, void *);
+    int signal;
+    int interrupts;             /* interrupted RFLAGS.IF */
+    siginfo_t info;
+    ucontext_t context;
+} __attribute__((aligned(64)));
+
+static const int trap_registers[] = {
+    _REG_R15, _REG_R14, _REG_R13, _REG_R12, _REG_R11, _REG_R10,
+    _REG_R9, _REG_R8, _REG_RDI, _REG_RSI, _REG_RBP, _REG_RBX,
+    _REG_RDX, _REG_RCX, _REG_RAX
+};
+
+static int trap_stack_p(uintptr_t pointer)
 {
-    return (uintptr_t)(trap_stack + sizeof(trap_stack)) - partition * TRAP_PARTITION;
+    return pointer >= (uintptr_t)trap_stack
+        && pointer - (uintptr_t)trap_stack <= sizeof(trap_stack);
 }
 
-static unsigned partition_of(const void *address)
+/* Runs on the IST. FRAME lists r15..rax, vector, error, RIP, CS, RFLAGS,
+ * RSP, SS; FLOATING is the FXSAVE area. Return the delivery record. */
+struct trap_delivery *rumprun_trap_prepare(uint64_t *frame, void *floating)
 {
-    return (partition_top(0) - 1 - (uintptr_t)address) / TRAP_PARTITION;
-}
-
-/* A trap interrupting code outside a handler's stack region proves that the
- * handler, and every dispatch nested in it, was unwound. */
-static void discard_unwound_dispatches(uintptr_t interrupted)
-{
-    while (live_dispatches) {
-        const struct dispatch *last = &dispatches[live_dispatches - 1];
-        int inside = last->alternate ? on_alternate(interrupted)
-                   : on_alternate(interrupted) || interrupted < last->handler_top;
-        if (inside) return;
-        --live_dispatches;
-    }
-}
-
-/* Point the IST at the first partition no live dispatch occupies. The final
- * partition stays free for reporting excessive nesting. */
-static void select_free_partition(void)
-{
-    for (unsigned partition = 0; partition + 1 < TRAP_PARTITIONS; ++partition) {
-        unsigned i = 0;
-        while (i < live_dispatches && dispatches[i].partition != partition) ++i;
-        if (i == live_dispatches) {
-            *exception_ist = partition_top(partition);
-            return;
-        }
-    }
-    *exception_ist = partition_top(TRAP_PARTITIONS - 1);
-}
-
-/* The assembly frame lists r15..rax, vector, error, RIP, CS, flags, RSP, SS. */
-void rumprun_trap_dispatch(uint64_t *frame, void *floating)
-{
-    static const int registers[] = {
-        _REG_R15, _REG_R14, _REG_R13, _REG_R12, _REG_R11, _REG_R10,
-        _REG_R9, _REG_R8, _REG_RDI, _REG_RSI, _REG_RBP, _REG_RBX,
-        _REG_RDX, _REG_RCX, _REG_RAX
-    };
     int vector = frame[15];
-    int signal = vector == 3 ? SIGTRAP : vector == 6 ? SIGILL
+    int signal = vector == SIGNAL_VECTOR ? delivering_signal
+               : vector == 3 ? SIGTRAP : vector == 6 ? SIGILL
                : (vector == 0 || vector == 16 || vector == 19) ? SIGFPE : SIGSEGV;
-    uintptr_t address = frame[17];
+    uintptr_t address = vector == SIGNAL_VECTOR ? 0 : frame[17];
     if (vector == 14) __asm__ volatile("mov %%cr2,%0" : "=r"(address));
     struct sigaction action = actions[signal];
-    if (action.sa_handler == SIG_DFL || action.sa_handler == SIG_IGN
-        || sigismember(&blocked, signal)) {
-        fprintf(stderr, "RUMPRUN fatal trap %d rip=%lx address=%lx error=%lx\n",
-                vector, frame[17], address, frame[16]);
+    /* A CPU exception cannot wait for its signal to be unblocked. As Linux's
+     * force_sig_info does, and as SBCL's safepoint code expects, unblock it
+     * in this thread's mask and deliver. Signals from pthread_kill wait. */
+    if (vector != SIGNAL_VECTOR && action.sa_handler != SIG_DFL
+        && action.sa_handler != SIG_IGN)
+        sigdelset(&blocked, signal);
+    const char *fatal = trap_stack_p(frame[20]) ? "during trap delivery"
+                      : action.sa_handler == SIG_DFL ? "with the default action"
+                      : action.sa_handler == SIG_IGN ? "while ignored"
+                      : sigismember(&blocked, signal) ? "while blocked" : NULL;
+    if (fatal) {
+        fprintf(stderr, "RUMPRUN fatal trap %d (signal %d) %s in lwp %d: "
+                "rip=%lx address=%lx error=%lx\n", vector, signal, fatal, _lwp_self(),
+                frame[17], address, frame[16]);
         abort();
     }
-    /* Each live dispatch owns one 64 KiB IST partition for its raw frame.
-     * Handlers use the control stack or registered alternate stack. */
-    discard_unwound_dispatches(frame[20]);
-    if (live_dispatches + 1 >= TRAP_PARTITIONS) {
-        fprintf(stderr, "RUMPRUN fatal trap %d: %u nested dispatches\n",
-                vector, live_dispatches + 1);
-        abort();
-    }
-    uintptr_t handler_stack = frame[20] - 128; /* Preserve interrupted red zone. */
-    int handler_alternate = 0;
+    uintptr_t top = frame[20] - 128; /* Preserve the interrupted red zone. */
     if ((action.sa_flags & SA_ONSTACK) && !(alternate.ss_flags & SS_DISABLE)
-        && !on_alternate(frame[20])) {
-        handler_stack = (uintptr_t)alternate.ss_sp + alternate.ss_size;
-        handler_alternate = 1;
-    }
-    /* Like a kernel signal frame, the context lives on the handler's stack.
-     * SBCL without threads finds interrupted register roots only by
-     * conservatively scanning the control stack, which then covers it. */
-    ucontext_t *context = (void *)((handler_stack - sizeof(ucontext_t)) & ~(uintptr_t)63);
-    siginfo_t *info = (void *)(((uintptr_t)context - sizeof(siginfo_t)) & ~(uintptr_t)15);
-    memset(context, 0, sizeof(*context));
-    memset(info, 0, sizeof(*info));
+        && !on_alternate(frame[20]))
+        top = (uintptr_t)alternate.ss_sp + alternate.ss_size;
+    struct trap_delivery *delivery =
+        (void *)((top - sizeof(struct trap_delivery)) & ~(uintptr_t)63);
+    memset(delivery, 0, sizeof(*delivery));
+    memcpy(delivery->resume.floating, floating, 512);
+    memcpy(delivery->resume.registers, frame, sizeof(delivery->resume.registers));
+    delivery->resume.iret[0] = frame[17];
+    delivery->resume.iret[1] = frame[18];
+    delivery->resume.iret[2] = frame[19];
+    delivery->resume.iret[3] = frame[20];
+    delivery->resume.iret[4] = frame[21];
+    delivery->handler = action.sa_sigaction;
+    delivery->signal = signal;
+    delivery->interrupts = (frame[19] & 512) != 0;
+
+    ucontext_t *context = &delivery->context;
     uint64_t *gregs = context->uc_mcontext.__gregs;
-    for (int i = 0; i < 15; ++i) gregs[registers[i]] = frame[i];
+    for (int i = 0; i < 15; ++i) gregs[trap_registers[i]] = frame[i];
     gregs[_REG_RIP] = frame[17]; gregs[_REG_CS] = frame[18];
     gregs[_REG_RFLAGS] = frame[19]; gregs[_REG_RSP] = frame[20];
     gregs[_REG_SS] = frame[21]; gregs[_REG_ERR] = frame[16];
@@ -362,31 +552,38 @@ void rumprun_trap_dispatch(uint64_t *frame, void *floating)
     context->uc_sigmask = blocked;
     context->uc_stack = alternate;
     if (on_alternate(frame[20])) context->uc_stack.ss_flags |= SS_ONSTACK;
+
+    siginfo_t *info = &delivery->info;
     info->si_signo = signal;
-    info->si_code = vector == 14 ? ((frame[16] & 1) ? SEGV_ACCERR : SEGV_MAPERR)
+    info->si_code = vector == SIGNAL_VECTOR ? SI_LWP
+                  : vector == 14 ? ((frame[16] & 1) ? SEGV_ACCERR : SEGV_MAPERR)
                   : vector == 3 ? TRAP_BRKPT : vector == 0 ? FPE_INTDIV
                   : vector == 6 ? ILL_ILLOPC : vector == 13 ? SEGV_ACCERR
                   : floating_code(vector, floating);
     info->si_addr = (void *)address;
+
     for (int number = 1; number < NSIG; ++number)
         if (sigismember(&action.sa_mask, number)) sigaddset(&blocked, number);
     if (!(action.sa_flags & SA_NODEFER)) sigaddset(&blocked, signal);
-    unsigned self = live_dispatches++;
-    dispatches[self].partition = partition_of(frame);
-    dispatches[self].handler_top = handler_stack;
-    dispatches[self].alternate = handler_alternate;
-    select_free_partition();
-    if (frame[19] & 512) __asm__ volatile("sti" ::: "memory");
-    rumprun_call_handler((uintptr_t)info, action.sa_handler, signal, info, context);
+    return delivery;
+}
+
+/* Runs on the target stack below DELIVERY. Call the handler, then refresh
+ * the resume block from the context it may have changed. */
+struct resume_block *rumprun_trap_deliver(struct trap_delivery *delivery)
+{
+    if (delivery->interrupts) __asm__ volatile("sti" ::: "memory");
+    delivery->handler(delivery->signal, &delivery->info, &delivery->context);
     __asm__ volatile("cli" ::: "memory");
-    /* Also drops nested dispatches whose handlers unwound into this one. */
-    live_dispatches = self;
-    select_free_partition();
+    ucontext_t *context = &delivery->context;
+    uint64_t *gregs = context->uc_mcontext.__gregs;
     blocked = context->uc_sigmask;
-    for (int i = 0; i < 15; ++i) frame[i] = gregs[registers[i]];
-    frame[17] = gregs[_REG_RIP]; frame[19] = gregs[_REG_RFLAGS];
-    frame[20] = gregs[_REG_RSP];
-    memcpy(floating, context->uc_mcontext.__fpregs, 512);
+    for (int i = 0; i < 15; ++i) delivery->resume.registers[i] = gregs[trap_registers[i]];
+    delivery->resume.iret[0] = gregs[_REG_RIP];
+    delivery->resume.iret[2] = gregs[_REG_RFLAGS];
+    delivery->resume.iret[3] = gregs[_REG_RSP];
+    memcpy(delivery->resume.floating, context->uc_mcontext.__fpregs, 512);
+    return &delivery->resume;
 }
 
 void rumprun_machine_init(void)
@@ -418,6 +615,7 @@ void rumprun_machine_init(void)
     install_gate(14, rumprun_trap_14);
     install_gate(16, rumprun_trap_16);
     install_gate(19, rumprun_trap_19);
+    install_gate(SIGNAL_VECTOR, rumprun_trap_130);
     /* Route x87 errors to #MF rather than the legacy external IRQ13. */
     uintptr_t control;
     __asm__ volatile("mov %%cr0,%0" : "=r"(control));
@@ -427,4 +625,5 @@ void rumprun_machine_init(void)
     control |= (1UL << 9) | (1UL << 10);
     __asm__ volatile("mov %0,%%cr4" :: "r"(control) : "memory");
     sigemptyset(&blocked);
+    thread_started();
 }

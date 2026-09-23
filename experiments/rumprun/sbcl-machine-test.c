@@ -2,6 +2,9 @@
 #include "sbcl-machine.h"
 #include <assert.h>
 #include <setjmp.h>
+#include <pthread.h>
+#include <sched.h>
+#include <errno.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -148,8 +151,11 @@ static void test_ranges(void *base)
     }
     assert(rumprun_vm_unmap(base, SIZE_MAX - 4095) == -1);
     assert(rumprun_vm_protect(base, SIZE_MAX - 4095, PROT_NONE) == -1);
-    assert(rumprun_vm_unmap(base, 1) == -1);
     assert(*(volatile uint64_t *)base == 2);
+    /* Unmap rounds its length up to whole pages, as munmap does. */
+    unsigned char *pair = rumprun_vm_map((void *)(1UL << 41), 2*4096);
+    assert(pair && !rumprun_vm_unmap(pair, 4096 + 1));
+    assert(rumprun_vm_map(pair, 2*4096) == pair && !rumprun_vm_unmap(pair, 2*4096));
     for (int budget = 0; budget < 7; ++budget) {
         allocation_budget = budget;
         assert(!rumprun_vm_map((void *)(1UL << 40), 4*4096));
@@ -182,6 +188,30 @@ static void exception(int signal, siginfo_t *info, void *raw)
     }
 }
 
+static volatile unsigned forced_traps;
+
+static void forcing_trap(int signal, siginfo_t *info, void *raw)
+{
+    (void)signal; (void)info; (void)raw;
+    /* Without SA_NODEFER this handler runs with SIGTRAP blocked, yet a
+     * breakpoint here must still be delivered. */
+    if (++forced_traps == 1) __asm__ volatile("int3" ::: "memory");
+}
+
+/* A CPU exception whose signal is blocked is delivered anyway, unblocking
+ * the signal, as Linux's force_sig_info does. */
+static void test_forced_traps(const struct sigaction *resuming)
+{
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = forcing_trap;
+    action.sa_flags = SA_SIGINFO;
+    assert(!sigaction(SIGTRAP, &action, NULL));
+    __asm__ volatile("int3" ::: "memory");
+    assert(forced_traps == 2);
+    assert(!sigaction(SIGTRAP, resuming, NULL));
+}
+
 static jmp_buf unwind_target;
 static volatile unsigned unwinds;
 static void unwinding_exception(int signal, siginfo_t *info, void *raw)
@@ -212,6 +242,164 @@ static void test_unwinding(const struct sigaction *resuming)
     uint64_t answer;
     __asm__ volatile("mov $42,%%rax; int3" : "=a"(answer) :: "memory");
     assert(answer == 43 && breaks == before + 1);
+}
+
+static volatile unsigned thread_traps;
+static volatile int joining;
+
+static void thread_trap(int signal, siginfo_t *info, void *raw)
+{
+    (void)info; (void)raw;
+    sigset_t mask;
+    assert(!sigprocmask(SIG_SETMASK, NULL, &mask));
+    /* This thread blocked SIGUSR2 itself; the main thread did not. */
+    assert(sigismember(&mask, SIGUSR2) && sigismember(&mask, signal));
+    ++thread_traps;
+}
+
+static void *trapping_thread(void *argument)
+{
+    (void)argument;
+    sigset_t mask;
+    /* The creator runs in a SIGTRAP handler, and threads inherit its mask. */
+    assert(!sigprocmask(SIG_SETMASK, NULL, &mask) && sigismember(&mask, SIGTRAP));
+    sigemptyset(&mask); sigaddset(&mask, SIGTRAP);
+    assert(!sigprocmask(SIG_UNBLOCK, &mask, NULL));
+    sigemptyset(&mask); sigaddset(&mask, SIGUSR2);
+    assert(!sigprocmask(SIG_BLOCK, &mask, NULL));
+    __asm__ volatile("int3" ::: "memory");
+    return NULL;
+}
+
+static void joining_trap(int signal, siginfo_t *info, void *raw)
+{
+    (void)signal; (void)info; (void)raw;
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = thread_trap;
+    action.sa_flags = SA_SIGINFO;
+    assert(!sigaction(SIGTRAP, &action, NULL));
+    /* Block inside this handler while another thread takes its own trap. */
+    pthread_t thread;
+    assert(!pthread_create(&thread, NULL, trapping_thread, NULL));
+    assert(!pthread_join(thread, NULL));
+    sigset_t mask;
+    assert(!sigprocmask(SIG_SETMASK, NULL, &mask));
+    assert(!sigismember(&mask, SIGUSR2));
+    joining = 1;
+}
+
+/* Signal masks are per thread, and a thread blocked in a handler leaves the
+ * trap stack free for other threads' traps. */
+static void test_threads(const struct sigaction *resuming)
+{
+    sigset_t empty, previous;
+    sigemptyset(&empty);
+    assert(!sigprocmask(SIG_SETMASK, &empty, &previous));
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = joining_trap;
+    action.sa_flags = SA_SIGINFO;
+    assert(!sigaction(SIGTRAP, &action, NULL));
+    __asm__ volatile("int3" ::: "memory");
+    assert(joining && thread_traps == 1);
+    assert(!sigaction(SIGTRAP, resuming, NULL));
+    assert(!sigprocmask(SIG_SETMASK, &previous, NULL));
+}
+
+static pthread_mutex_t wake_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t wake_condition = PTHREAD_COND_INITIALIZER;
+static volatile int waiting, released, wait_returns;
+static volatile unsigned signal_deliveries;
+static pthread_t signal_thread;
+
+static void user_signal(int signal, siginfo_t *info, void *raw)
+{
+    (void)raw;
+    assert(signal == SIGUSR1 && info->si_code == SI_LWP);
+    signal_thread = pthread_self();
+    ++signal_deliveries;
+}
+
+static void *waiting_thread(void *argument)
+{
+    (void)argument;
+    assert(!pthread_mutex_lock(&wake_lock));
+    waiting = 1;
+    while (!released) {
+        assert(!pthread_cond_wait(&wake_condition, &wake_lock));
+        ++wait_returns;
+    }
+    assert(!pthread_mutex_unlock(&wake_lock));
+    return NULL;
+}
+
+static volatile int sigwaiting, waited_signal;
+
+static void *sigwaiting_thread(void *argument)
+{
+    (void)argument;
+    sigset_t wanted;
+    sigemptyset(&wanted); sigaddset(&wanted, SIGUSR2);
+    assert(!pthread_sigmask(SIG_BLOCK, &wanted, NULL));
+    sigwaiting = 1;
+    int signal = 0;
+    assert(!sigwait(&wanted, &signal));
+    waited_signal = signal;
+    return NULL;
+}
+
+/* pthread_kill runs the handler in the target thread while it waits, and
+ * the wait resumes afterwards, as with a kernel's signal delivery. */
+static void test_thread_signals(void)
+{
+    struct sigaction action, previous;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = user_signal;
+    action.sa_flags = SA_SIGINFO;
+    assert(!sigaction(SIGUSR1, &action, &previous));
+    sigset_t empty, mask;
+    sigemptyset(&empty);
+    assert(!sigprocmask(SIG_SETMASK, &empty, &mask));
+
+    pthread_t thread;
+    assert(!pthread_create(&thread, NULL, waiting_thread, NULL));
+    while (!waiting) sched_yield();
+    assert(pthread_kill(thread, 0) == 0);
+    assert(pthread_kill(thread, SIGURG) == 0); /* Default action: ignored. */
+    assert(pthread_kill(thread, SIGUSR1) == 0);
+    while (!signal_deliveries) sched_yield();
+    assert(signal_deliveries == 1 && pthread_equal(signal_thread, thread));
+    assert(waiting && !released);
+    assert(!pthread_mutex_lock(&wake_lock));
+    released = 1;
+    assert(!pthread_cond_signal(&wake_condition));
+    assert(!pthread_mutex_unlock(&wake_lock));
+    assert(!pthread_join(thread, NULL));
+    assert(pthread_kill(thread, 0) == ESRCH);
+
+    /* A blocked signal to oneself waits for the unblocking call. */
+    sigset_t user;
+    sigemptyset(&user); sigaddset(&user, SIGUSR1);
+    assert(!sigprocmask(SIG_BLOCK, &user, NULL));
+    assert(pthread_kill(pthread_self(), SIGUSR1) == 0);
+    assert(signal_deliveries == 1);
+    assert(!sigprocmask(SIG_UNBLOCK, &user, NULL));
+    assert(signal_deliveries == 2 && pthread_equal(signal_thread, pthread_self()));
+
+    assert(!sigaction(SIGUSR1, &previous, NULL));
+    assert(!sigprocmask(SIG_SETMASK, &mask, NULL));
+
+    /* sigwait receives a blocked signal sent to its thread, even one sent
+     * before the thread first runs. */
+    sigset_t wanted;
+    sigemptyset(&wanted); sigaddset(&wanted, SIGUSR2);
+    assert(!sigprocmask(SIG_BLOCK, &wanted, NULL));
+    assert(!pthread_create(&thread, NULL, sigwaiting_thread, NULL));
+    assert(pthread_kill(thread, SIGUSR2) == 0);
+    assert(!pthread_join(thread, NULL));
+    assert(sigwaiting && waited_signal == SIGUSR2);
+    assert(!sigprocmask(SIG_SETMASK, &mask, NULL));
 }
 
 int main(void)
@@ -286,6 +474,9 @@ int main(void)
     assert(nested == 4);
     test_floating();
     test_unwinding(&action);
-    puts("MACHINE-OK: VM ranges/rollback, masks, nested 24KiB stacks, FP preservation/x87/XM vector, unwound handlers");
+    test_forced_traps(&action);
+    test_threads(&action);
+    test_thread_signals();
+    puts("MACHINE-OK: VM ranges/rollback, masks, nested 24KiB stacks, FP preservation/x87/XM vector, unwound handlers, forced traps, threads, thread signals");
     return 0;
 }
