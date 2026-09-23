@@ -23,6 +23,7 @@ static int expect_alternate;
 /* Test-only linker allocation injection: count only tracked machine pages. */
 static int allocation_budget = -1;
 static void *tracked[32];
+static volatile unsigned page_allocations, page_frees;
 extern void *__real_bmk_pgalloc(int);
 extern void __real_bmk_pgfree(void *, int);
 void *__wrap_bmk_pgalloc(int order)
@@ -30,6 +31,7 @@ void *__wrap_bmk_pgalloc(int order)
     assert(order == 0);
     if (allocation_budget == 0) return NULL;
     void *page = __real_bmk_pgalloc(order);
+    if (page) ++page_allocations;
     if (page && allocation_budget > 0) {
         --allocation_budget;
         unsigned i;
@@ -42,6 +44,7 @@ void *__wrap_bmk_pgalloc(int order)
 void __wrap_bmk_pgfree(void *page, int order)
 {
     assert(order == 0);
+    ++page_frees;
     for (unsigned i = 0; i < 32; ++i)
         if (tracked[i] == page) tracked[i] = NULL;
     __real_bmk_pgfree(page, order);
@@ -158,13 +161,14 @@ static void test_ranges(void *base)
     unsigned char *pair = rumprun_vm_map((void *)(1UL << 41), 2*4096);
     assert(pair && !rumprun_vm_unmap(pair, 4096 + 1));
     assert(rumprun_vm_map(pair, 2*4096) == pair && !rumprun_vm_unmap(pair, 2*4096));
-    for (int budget = 0; budget < 7; ++budget) {
+    /* A fresh reservation allocates its three page tables and no pages. */
+    for (int budget = 0; budget < 3; ++budget) {
         allocation_budget = budget;
         assert(!rumprun_vm_map((void *)(1UL << 40), 4*4096));
         allocation_budget = -1;
         for (unsigned i = 0; i < 32; ++i) assert(!tracked[i]);
     }
-    allocation_budget = 7;
+    allocation_budget = 3;
     void *mapped = rumprun_vm_map((void *)(1UL << 40), 4*4096);
     allocation_budget = -1;
     assert(mapped);
@@ -404,6 +408,65 @@ static void test_thread_signals(void)
     assert(!sigprocmask(SIG_SETMASK, &mask, NULL));
 }
 
+static volatile uintptr_t lazy_trap_stack;
+
+static void lazy_trap(int signal, siginfo_t *info, void *raw)
+{
+    (void)signal; (void)info; (void)raw;
+    unsigned char here;
+    lazy_trap_stack = (uintptr_t)&here;
+}
+
+/* Reservations cost only page tables until touched. First access backs a
+ * zeroed page, protection applies to pages not yet backed, and signal frames
+ * land on an alternate stack that has never been touched. */
+static void test_lazy_pages(const struct sigaction *repairing)
+{
+    struct sigaction saved_segv, saved_trap, trap;
+    assert(!sigaction(SIGSEGV, repairing, &saved_segv));
+    unsigned allocated = page_allocations, freed = page_frees;
+    unsigned char *lazy = rumprun_vm_map((void *)(1UL << 42), 64UL << 20);
+    assert(lazy);
+    /* One page directory pointer table, one directory, and 32 page tables. */
+    unsigned tables = page_allocations - allocated;
+    assert(tables == 34);
+    volatile unsigned char *first = lazy + 5*4096;
+    assert(first[7] == 0 && page_allocations - allocated == tables + 1);
+    first[8] = 9;
+    assert(first[8] == 9 && page_allocations - allocated == tables + 1);
+
+    unsigned before = faults;
+    memory = lazy + 9*4096;
+    assert(!rumprun_vm_protect(memory, 4096, PROT_NONE));
+    assert(*(volatile unsigned char *)memory == 0);
+    assert(faults == before + 1 && page_allocations - allocated == tables + 2);
+    memory = lazy + 11*4096;
+    assert(!rumprun_vm_protect(memory, 4096, PROT_READ));
+    assert(*(volatile unsigned char *)memory == 0 && faults == before + 1);
+    *(volatile unsigned char *)memory = 3;
+    assert(faults == before + 2 && *(volatile unsigned char *)memory == 3);
+
+    stack_t stack, previous;
+    memset(&stack, 0, sizeof(stack));
+    stack.ss_sp = lazy + (32UL << 20); stack.ss_size = 65536;
+    assert(!sigaltstack(&stack, &previous));
+    memset(&trap, 0, sizeof(trap));
+    trap.sa_sigaction = lazy_trap;
+    trap.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    assert(!sigaction(SIGTRAP, &trap, &saved_trap));
+    unsigned backed = page_allocations;
+    __asm__ volatile("int3" ::: "memory");
+    assert(lazy_trap_stack > (uintptr_t)stack.ss_sp
+           && lazy_trap_stack < (uintptr_t)stack.ss_sp + stack.ss_size);
+    assert(page_allocations > backed);
+    assert(!sigaction(SIGTRAP, &saved_trap, NULL));
+    assert(!sigaltstack(&previous, NULL));
+
+    assert(!rumprun_vm_unmap(lazy, 64UL << 20));
+    assert(page_frees - freed == page_allocations - allocated);
+    assert(!sigaction(SIGSEGV, &saved_segv, NULL));
+}
+
 int main(void)
 {
     rumprun_machine_init();
@@ -479,6 +542,7 @@ int main(void)
     test_forced_traps(&action);
     test_threads(&action);
     test_thread_signals();
-    puts("MACHINE-OK: VM ranges/rollback, masks, nested 24KiB stacks, FP preservation/x87/XM vector, unwound handlers, forced traps, threads, thread signals");
+    test_lazy_pages(&action);
+    puts("MACHINE-OK: VM ranges/rollback, masks, nested 24KiB stacks, FP preservation/x87/XM vector, unwound handlers, forced traps, threads, thread signals, lazy pages");
     return 0;
 }

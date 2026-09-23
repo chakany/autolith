@@ -39,6 +39,7 @@ rumprun_trap_common:
     pushq %r14
     pushq %r15
     movq %rsp, %rdi
+    movq %rsp, %rbx /* Saved above, so free to hold the frame. */
     andq $-16, %rsp
     subq $512, %rsp
     fxsave64 (%rsp)
@@ -51,6 +52,29 @@ rumprun_trap_common:
     cld
     movq %rsp, %rsi
     call rumprun_trap_prepare
+    testq %rax, %rax
+    jnz 1f
+    /* A lazy page was backed: rerun the faulting instruction from the IST. */
+    fxrstor64 (%rsp)
+    movq %rbx, %rsp
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rdi
+    popq %rsi
+    popq %rbp
+    popq %rbx
+    popq %rdx
+    popq %rcx
+    popq %rax
+    addq $16, %rsp /* Vector and error code. */
+    iretq
+1:
     /* Continue on the target stack, below the delivery record. */
     movq %rax, %rsp
     movq %rax, %rdi

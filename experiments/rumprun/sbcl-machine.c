@@ -17,6 +17,11 @@
 #define PHYSICAL_MASK 0x000ffffffffff000UL
 #define NX (1UL << 63)
 #define OWNED (1UL << 9)
+/* An owned leaf with LAZY has no page yet; the first access backs it. Its RW
+ * and NX bits hold the protection, and ACCESSIBLE stands in for present. */
+#define LAZY (1UL << 10)
+#define ACCESSIBLE (1UL << 11)
+#define MAP_LIMIT (1UL << 34)
 #define VM_START (1UL << 32)
 #define VM_END (1UL << 47)
 static uintptr_t next_virtual = 0x2000000000UL;
@@ -44,6 +49,7 @@ static void install_gate(unsigned vector, void (*handler)(void))
     gate->low = address; gate->middle = address >> 16; gate->high = address >> 32;
     gate->selector = 8; gate->ist = 4; gate->attributes = 0x8e; gate->reserved = 0;
 }
+
 extern void rumprun_trap_0(void), rumprun_trap_3(void), rumprun_trap_6(void);
 extern void rumprun_trap_13(void), rumprun_trap_14(void), rumprun_trap_16(void);
 extern void rumprun_trap_19(void), rumprun_trap_130(void);
@@ -60,6 +66,15 @@ static void *page_allocate(void)
 static void page_free(void *page)
 {
     bmk_pgfree_one(page);
+}
+
+/* Protection bits of a leaf entry: RW and NX, plus P when backed or
+ * ACCESSIBLE when lazy. */
+static uint64_t protection_bits(int protection, uint64_t accessible)
+{
+    return (protection ? accessible : 0)
+         | ((protection & PROT_WRITE) ? 2 : 0)
+         | ((protection & PROT_EXEC) ? 0 : NX);
 }
 
 static uint64_t *page_entry(uintptr_t address, int create)
@@ -85,6 +100,21 @@ static uint64_t *page_entry(uintptr_t address, int create)
 static void invalidate(uintptr_t address)
 {
     __asm__ volatile("invlpg (%0)" :: "r"(address) : "memory");
+}
+
+/* Back the lazy page containing ADDRESS with a zeroed page when its
+ * protection allows access. Return 1 when it was backed, 0 when there is
+ * nothing to back, and -1 when no physical page is left. */
+static int page_back(uintptr_t address)
+{
+    if (address < VM_START || address >= VM_END) return 0;
+    uint64_t *entry = page_entry(address, 0);
+    if (!entry || (*entry & (OWNED|LAZY|ACCESSIBLE)) != (OWNED|LAZY|ACCESSIBLE)) return 0;
+    void *page = page_allocate();
+    if (!page) return -1;
+    *entry = (uintptr_t)page | 1 | (*entry & (2|NX)) | OWNED;
+    invalidate(address);
+    return 1;
 }
 
 /* Only free tables we installed, never a boot-provided ancestor. */
@@ -127,10 +157,13 @@ static int valid_range(uintptr_t address, size_t length)
         && !(address & (PAGE-1)) && length && !(length & (PAGE-1))
         && length <= VM_END - address;
 }
+
+/* Reserve LENGTH bytes of lazily backed, readable, writable, and executable
+ * memory. Page tables are built now; each page is backed on first access. */
 void *rumprun_vm_map(void *requested, size_t length)
 {
     uintptr_t address = (uintptr_t)requested;
-    if (!length || length > (1UL << 30) || (address & (PAGE-1))) return NULL;
+    if (!length || length > MAP_LIMIT || (address & (PAGE-1))) return NULL;
     length = (length + PAGE-1) & ~(PAGE-1);
     if (!address) address = (next_virtual + 32767) & ~32767UL;
     if (!valid_range(address, length)) return NULL;
@@ -141,14 +174,12 @@ void *rumprun_vm_map(void *requested, size_t length)
     size_t offset;
     for (offset = 0; offset < length; offset += PAGE) {
         uint64_t *entry = page_entry(address + offset, 1);
-        void *page = entry ? page_allocate() : NULL;
-        if (!page) {
+        if (!entry) {
             prune_tables(address + offset);
             if (offset) rumprun_vm_unmap((void *)address, offset);
             return NULL;
         }
-        *entry = (uintptr_t)page | 3 | OWNED;
-        invalidate(address + offset);
+        *entry = OWNED | LAZY | protection_bits(PROT_READ|PROT_WRITE|PROT_EXEC, ACCESSIBLE);
     }
     if (!requested) next_virtual = address + length;
     return (void *)address;
@@ -166,10 +197,10 @@ int rumprun_vm_unmap(void *base, size_t length)
     for (size_t offset = 0; offset < length; offset += PAGE) {
         uint64_t *entry = page_entry(address + offset, 0);
         if (entry && *entry) {
-            void *page = (void *)(*entry & PHYSICAL_MASK);
+            uint64_t old = *entry;
             *entry = 0;
             invalidate(address + offset);
-            page_free(page);
+            if (!(old & LAZY)) page_free((void *)(old & PHYSICAL_MASK));
         }
     }
     for (size_t offset = 0; offset < length; offset += PAGE)
@@ -189,10 +220,9 @@ int rumprun_vm_protect(void *base, size_t length, int protection)
     }
     for (size_t offset = 0; offset < length; offset += PAGE) {
         uint64_t *entry = page_entry(address + offset, 0);
-        *entry = (*entry & PHYSICAL_MASK) | OWNED
-               | (protection ? 1 : 0)
-               | ((protection & PROT_WRITE) ? 2 : 0)
-               | ((protection & PROT_EXEC) ? 0 : NX);
+        *entry = (*entry & LAZY)
+               ? OWNED | LAZY | protection_bits(protection, ACCESSIBLE)
+               : (*entry & PHYSICAL_MASK) | OWNED | protection_bits(protection, 1);
         invalidate(address + offset);
     }
     return 0;
@@ -504,11 +534,29 @@ static int trap_stack_p(uintptr_t pointer)
         && pointer - (uintptr_t)trap_stack <= sizeof(trap_stack);
 }
 
+/* Stop the guest when a lazy page cannot be backed, as an out-of-memory
+ * kill would. */
+static void page_exhausted(uintptr_t address, uintptr_t rip)
+{
+    fprintf(stderr, "RUMPRUN fatal: no physical page left to back %lx "
+            "in lwp %d: rip=%lx\n", address, _lwp_self(), rip);
+    abort();
+}
+
 /* Runs on the IST. FRAME lists r15..rax, vector, error, RIP, CS, RFLAGS,
- * RSP, SS; FLOATING is the FXSAVE area. Return the delivery record. */
+ * RSP, SS; FLOATING is the FXSAVE area. Return the delivery record, or NULL
+ * when the trap was a first access to a lazy page, now backed, and the
+ * interrupted instruction should simply run again. */
 struct trap_delivery *rumprun_trap_prepare(uint64_t *frame, void *floating)
 {
     int vector = frame[15];
+    if (vector == 14 && !(frame[16] & 1)) {
+        uintptr_t missing;
+        __asm__ volatile("mov %%cr2,%0" : "=r"(missing));
+        int backed = page_back(missing);
+        if (backed < 0) page_exhausted(missing, frame[17]);
+        if (backed) return NULL;
+    }
     int signal = vector == SIGNAL_VECTOR ? delivering_signal
                : vector == 3 ? SIGTRAP : vector == 6 ? SIGILL
                : (vector == 0 || vector == 16 || vector == 19) ? SIGFPE : SIGSEGV;
@@ -537,6 +585,19 @@ struct trap_delivery *rumprun_trap_prepare(uint64_t *frame, void *floating)
         top = (uintptr_t)alternate.ss_sp + alternate.ss_size;
     struct trap_delivery *delivery =
         (void *)((top - sizeof(struct trap_delivery)) & ~(uintptr_t)63);
+    /* A fault while writing the record would reenter this IST and overwrite
+     * the frame being delivered, so back its lazy pages first and refuse a
+     * target stack that is not writable. */
+    for (uintptr_t page = (uintptr_t)delivery & ~(PAGE-1); page < top; page += PAGE) {
+        if (page_back(page) < 0) page_exhausted(page, frame[17]);
+        uint64_t *entry = page >= VM_START && page < VM_END ? page_entry(page, 0) : NULL;
+        if (entry && (*entry & OWNED) && (*entry & 3) != 3) {
+            fprintf(stderr, "RUMPRUN fatal trap %d (signal %d): signal stack %lx is "
+                    "not writable in lwp %d: rip=%lx\n", vector, signal, page,
+                    _lwp_self(), frame[17]);
+            abort();
+        }
+    }
     memset(delivery, 0, sizeof(*delivery));
     memcpy(delivery->resume.floating, floating, 512);
     memcpy(delivery->resume.registers, frame, sizeof(delivery->resume.registers));

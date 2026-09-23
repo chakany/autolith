@@ -2,8 +2,10 @@
 #ifndef SBCL_RUMPRUN_MACHINE_H
 #define SBCL_RUMPRUN_MACHINE_H
 #include <stddef.h>
-/* Map rounds nonzero lengths to pages (at most 1 GiB); unmap and protect
- * round them as munmap and mprotect do. Only owned low-canonical
+/* Map reserves nonzero lengths rounded to pages (at most 16 GiB), backing each
+ * page with zeroed memory on first access; running out of physical pages
+ * then stops the guest. Unmap and protect round lengths as munmap and
+ * mprotect do. Only owned low-canonical
  * [4 GiB, 128 TiB) mappings are changed. One vCPU, whose cooperative
  * scheduler never mutates the tables concurrently.
  * Synchronous exceptions and signals raised by pthread_kill run their
