@@ -1,10 +1,11 @@
-;;;; Generate the cold core's static foreign-symbol table and embedded data.
+;;;; Generate the guest's static foreign-symbol table and embedded data.
 (require :asdf)
 (unless (find-package '#:autolith) (defpackage #:autolith (:use #:cl)))
 (in-package #:autolith)
 
 (defun rump-sbcl-source-archive (root)
-  "Embed warm-init sources as length-prefixed byte records in stable path order."
+  "Write and return an archive of warm-init sources as length-prefixed byte
+records in stable path order."
   (let ((files nil))
     (labels ((walk (directory all)
                (dolist (file (uiop:directory-files directory))
@@ -13,7 +14,10 @@
                    (push file files)))
                (dolist (child (uiop:subdirectories directory)) (walk child all))))
       (walk (merge-pathnames "src/" root) nil)
-      (walk (merge-pathnames "output/ucd/" root) t))
+      (walk (merge-pathnames "output/ucd/" root) t)
+      ;; The load phase reads fasls a previous guest compiled and exported.
+      (when (uiop:directory-exists-p (merge-pathnames "obj/from-self/" root))
+        (walk (merge-pathnames "obj/from-self/" root) t)))
     ;; Warm compilation also reads build-generated data outside src/.
     (dolist (file (uiop:directory-files (merge-pathnames "tools-for-build/" root)))
       (when (equal (pathname-type file) "lisp-expr")
@@ -26,24 +30,62 @@
     (dolist (name '("version.lisp-expr" "local-target-features.lisp-expr"
                     "make-target-2-load.lisp" "contrib/asdf/asdf.lisp"))
       (push (merge-pathnames name root) files))
-    (with-open-file (out (merge-pathnames "output/warm-sources.bin" root)
-                         :direction ':output :if-exists ':supersede
-                         :element-type '(unsigned-byte 8))
-      (flet ((u32 (value)
-               (assert (typep value '(unsigned-byte 32)))
-               (loop for shift from 24 downto 0 by 8
-                     do (write-byte (ldb (byte 8 shift) value) out))))
-        (dolist (file (sort files #'string< :key #'namestring))
-          (let ((name (enough-namestring file root)))
-            (with-open-file (input file :element-type '(unsigned-byte 8))
-              (u32 (length name)) (u32 (file-length input))
-              (map nil (lambda (character) (write-byte (char-code character) out)) name)
-              (uiop:copy-stream-to-stream input out :element-type '(unsigned-byte 8)))))
-        (u32 0) (u32 0)))))
+    (rump-sbcl-write-archive root files (merge-pathnames "output/warm-sources.bin" root))))
+
+(defun rump-sbcl-write-archive (root files output)
+  "Write FILES, named relative to ROOT, to the archive OUTPUT as length-prefixed
+byte records in stable path order, and return OUTPUT."
+  (with-open-file (out output :direction ':output :if-exists ':supersede
+                              :element-type '(unsigned-byte 8))
+    (flet ((u32 (value)
+             (assert (typep value '(unsigned-byte 32)))
+             (loop for shift from 24 downto 0 by 8
+                   do (write-byte (ldb (byte 8 shift) value) out))))
+      (dolist (file (sort (copy-list files) #'string< :key #'namestring))
+        (let ((name (enough-namestring file root)))
+          (with-open-file (input file :element-type '(unsigned-byte 8))
+            (u32 (length name)) (u32 (file-length input))
+            (map nil (lambda (character) (write-byte (char-code character) out)) name)
+            (uiop:copy-stream-to-stream input out :element-type '(unsigned-byte 8)))))
+      (u32 0) (u32 0)))
+  output)
+
+(defun rump-sbcl-contrib-archive (root)
+  "Write and return an archive of contrib Lisp sources and definitions, and
+the host-produced grovel constants in rumprun-grovel/ when present."
+  (let ((files nil))
+    (labels ((walk (directory types)
+               (dolist (file (uiop:directory-files directory))
+                 (when (or (null types) (member (pathname-type file) types :test #'equal))
+                   (push file files)))
+               (dolist (child (uiop:subdirectories directory))
+                 (walk child types))))
+      (walk (merge-pathnames "contrib/" root) '("lisp" "asd"))
+      (when (uiop:directory-exists-p (merge-pathnames "rumprun-grovel/" root))
+        (walk (merge-pathnames "rumprun-grovel/" root) nil)))
+    (rump-sbcl-write-archive root files (merge-pathnames "output/contrib-sources.bin" root))))
+
+(defun rump-sbcl-tree-archive (root tree)
+  "Write and return an archive of every regular file below TREE, named
+relative to TREE so it unpacks below the guest's /core/."
+  (let ((tree (uiop:ensure-directory-pathname tree))
+        (files nil))
+    (labels ((walk (directory)
+               (dolist (file (uiop:directory-files directory))
+                 (push file files))
+               (dolist (child (uiop:subdirectories directory))
+                 (walk child))))
+      (walk tree))
+    (rump-sbcl-write-archive tree files (merge-pathnames "output/tree-sources.bin" root))))
+
+(defun rump-sbcl-empty-archive (root)
+  "Write and return an archive holding only the terminating record."
+  (rump-sbcl-write-archive root nil (merge-pathnames "output/no-sources.bin" root)))
 
 (defparameter *rump-sbcl-foreign-operators*
   '("extern-alien" "define-alien-routine" "define-alien-variable"
     "foreign-symbol-address" "find-foreign-symbol-address"
+    "find-dynamic-foreign-symbol-address"
     "syscall" "syscall*" "int-syscall" "void-syscall" "with-restarted-syscall")
   "Lisp operators whose first string argument names a C symbol.")
 
@@ -115,14 +157,15 @@ optionally qualified by a package prefix such as SB-ALIEN: or SB-SYS::."
         t
         nil)))
 
-(defun rump-sbcl-warm-foreign-names (root)
-  "Collect C symbols that warm-loaded sources name in foreign operator forms.
-The scan is textual, so it also sees names under other platforms' feature
-conditionals; those stay unresolved weak references."
+(defun rump-sbcl-warm-foreign-names (root script)
+  "Collect C symbols that warm-loaded sources, contrib sources, and SCRIPT
+name in foreign operator forms. The scan is textual, so it also sees names under other
+platforms' feature conditionals; those stay unresolved weak references."
   (let ((names nil))
-    (dolist (file (cons (merge-pathnames "sbcl-smoke.lisp"
-                                         (uiop:pathname-directory-pathname *load-truename*))
-                        (uiop:directory-files (merge-pathnames "src/**/" root) "*.lisp")))
+    (dolist (file (append (list script)
+                          (uiop:directory-files (merge-pathnames "src/**/" root) "*.lisp")
+                          (uiop:directory-files (merge-pathnames "contrib/**/" root) "*.lisp")
+                          (uiop:directory-files (merge-pathnames "contrib/**/" root) "*.asd")))
       (let ((text (uiop:read-file-string file :external-format ':latin-1)))
         (dolist (operator *rump-sbcl-foreign-operators*)
           (let ((needle operator))
@@ -199,7 +242,8 @@ the keyword is not an option of such a binding."
           do (format out "extern char foreign_~D[] __asm__(~S)~:[~; __attribute__((weak))~];~%"
                      index
                      ;; Test-harness exits use immediate, flushed QEMU termination.
-                     (cond ((member name '("_exit" "exit") :test #'string=) "__wrap__exit")
+                     (cond ((string= name "exit") "__wrap_exit")
+                           ((string= name "_exit") "__wrap__exit")
                            ((string= name "sigaddset") "__sigaddset14")
                            ((string= name "sigdelset") "__sigdelset14")
                            (t name))
@@ -210,8 +254,25 @@ the keyword is not an option of such a binding."
     (format out "};~%void *rumprun_symbol(const char *name) {~%  for (size_t i=0; i<sizeof(symbols)/sizeof(symbols[0]); ++i)~%    if (!strcmp(name, symbols[i].name)) return symbols[i].address;~%  return NULL;~%}~%")
     (format t "Declared ~D warm-only symbols weak.~%" (length weak))))
 
-(defun rump-sbcl-link-inputs (root)
-  "Use genesis's explicit alien linkage map, never host symbol addresses."
+(defun rump-sbcl-read-lookups (path)
+  "Return the C names in the guest foreign lookup manifest at PATH, whose
+lines are \"found NAME\" or \"missing NAME\"."
+  (with-open-file (stream path)
+    (loop for line = (read-line stream nil) while line
+          collect (let* ((space (position #\Space line))
+                         (state (and space (subseq line 0 space)))
+                         (name  (and space (subseq line (1+ space)))))
+                    (unless (and (member state '("found" "missing") :test #'string=)
+                                 (rump-sbcl-c-identifier-p name))
+                      (error "Malformed foreign lookup line in ~A: ~S" path line))
+                    name))))
+
+(defun rump-sbcl-link-inputs (root &key core script sources tree lookups)
+  "Generate the static symbol table and embed CORE, SCRIPT, and SOURCES,
+which is :WARM for SBCL's warm-initialization sources, :CONTRIB for contrib
+sources, :TREE for every file below TREE, or :NONE. LOOKUPS
+names the foreign lookup manifest of the guest that saved CORE, if any. Use
+genesis's explicit alien linkage map, never host symbol addresses."
   (let ((names nil) (inside nil))
     (with-open-file (stream (merge-pathnames "output/cold-sbcl.map" root))
       (loop for line = (read-line stream nil) while line
@@ -231,27 +292,54 @@ the keyword is not an option of such a binding."
     ;; warm-only names are weak: absent symbols resolve to NULL and report
     ;; through the dlsym wrapper when looked up.
     (let* ((libc (rump-sbcl-archive-symbols *rump-sbcl-libc-archive*))
-           (warm (set-difference (rump-sbcl-warm-foreign-names root) names
-                                 :test #'string=))
+           (warm (set-difference (remove-duplicates
+                                  (append (rump-sbcl-warm-foreign-names root script)
+                                          (and lookups (rump-sbcl-read-lookups lookups)))
+                                  :test #'string=)
+                                 names :test #'string=))
            (weak (remove-if (lambda (name) (gethash name libc)) warm)))
       (setf names (append names (remove-if-not (lambda (name) (gethash name libc)) warm)))
       (setf names (sort (append names (copy-list weak)) #'string<))
       (rump-sbcl-write-symbol-table root names weak))
-    (rump-sbcl-source-archive root)
-    (with-open-file (out (merge-pathnames "src/runtime/rumprun-core.S" root)
-                         :direction ':output :if-exists ':supersede)
-      (format out ".section .rodata~%.balign 4096~%.globl rumprun_core_start, rumprun_core_end~%rumprun_core_start:~%.incbin ~S~%rumprun_core_end:~%"
-              (namestring (merge-pathnames "output/cold-sbcl.core" root)))
-      (format out ".globl rumprun_script_start, rumprun_script_end~%rumprun_script_start:~%.incbin ~S~%rumprun_script_end:~%"
-              (namestring (merge-pathnames "sbcl-smoke.lisp"
-                                          (uiop:pathname-directory-pathname *load-truename*))))
-      (format out ".globl rumprun_sources_start, rumprun_sources_end~%rumprun_sources_start:~%.incbin ~S~%rumprun_sources_end:~%.section .note.GNU-stack,~S,@progbits~%"
-              (namestring (merge-pathnames "output/warm-sources.bin" root)) ""))
+    (let ((archive (ecase sources
+                     (:warm    (rump-sbcl-source-archive root))
+                     (:contrib (rump-sbcl-contrib-archive root))
+                     (:tree    (rump-sbcl-tree-archive root tree))
+                     (:none    (rump-sbcl-empty-archive root)))))
+      (with-open-file (out (merge-pathnames "src/runtime/rumprun-core.S" root)
+                           :direction ':output :if-exists ':supersede)
+        (format out ".section .rodata~%.balign 4096~%.globl rumprun_core_start, rumprun_core_end~%rumprun_core_start:~%.incbin ~S~%rumprun_core_end:~%"
+                (namestring core))
+        (format out ".globl rumprun_script_start, rumprun_script_end~%rumprun_script_start:~%.incbin ~S~%rumprun_script_end:~%"
+                (namestring script))
+        (format out ".globl rumprun_sources_start, rumprun_sources_end~%rumprun_sources_start:~%.incbin ~S~%rumprun_sources_end:~%.section .note.GNU-stack,~S,@progbits~%"
+                (namestring archive) "")))
     (let ((config (merge-pathnames "src/runtime/Config" root)))
       (unless (search "rumprun-symbols.c" (uiop:read-file-string config))
         (with-open-file (out config :direction ':output :if-exists ':append)
           (format out "~%OS_SRC += rumprun-symbols.c~%ASSEM_SRC += rumprun-core.S~%"))))
     (format t "Generated ~D static symbol entries.~%" (length names))))
 
-(rump-sbcl-link-inputs
- (uiop:ensure-directory-pathname (first (uiop:command-line-arguments))))
+(defun rump-sbcl-link-main (arguments)
+  "Parse ROOT --core FILE --script FILE --sources warm|contrib|tree|none
+[--tree DIRECTORY] [--lookups FILE]
+and link."
+  (destructuring-bind (root &rest options) arguments
+    (flet ((option (name &optional (required t))
+             (let ((tail (member name options :test #'string=)))
+               (or (second tail) (and required (error "Missing ~A." name))))))
+      (rump-sbcl-link-inputs (uiop:ensure-directory-pathname root)
+                             :core    (uiop:parse-native-namestring (option "--core"))
+                             :script  (uiop:parse-native-namestring (option "--script"))
+                             :sources (let ((sources (option "--sources")))
+                                        (cond ((string= sources "warm") ':warm)
+                                              ((string= sources "contrib") ':contrib)
+                                              ((string= sources "tree") ':tree)
+                                              ((string= sources "none") ':none)
+                                              (t (error "Unknown --sources ~A." sources))))
+                             :tree    (let ((tree (option "--tree" nil)))
+                                        (and tree (uiop:parse-native-namestring tree)))
+                             :lookups (let ((lookups (option "--lookups" nil)))
+                                        (and lookups (uiop:parse-native-namestring lookups)))))))
+
+(rump-sbcl-link-main (uiop:command-line-arguments))
