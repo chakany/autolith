@@ -97,6 +97,8 @@
 (define-test-suite command-environment
   test-command-environment-credentials
   test-command-environment-overrides
+  test-command-environment-private-home
+  test-command-sandbox-private-home
   test-shell-command-credential-environment)
 
 (define-test-suite context
