@@ -94,6 +94,11 @@
   test-command-permission-persistence
   test-command-permission-corruption)
 
+(define-test-suite command-environment
+  test-command-environment-credentials
+  test-command-environment-overrides
+  test-shell-command-credential-environment)
+
 (define-test-suite context
   test-session-state-context-contributor
   test-request-local-context)

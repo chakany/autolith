@@ -237,7 +237,10 @@ existing symlinks and the nearest existing parent before checking the boundary."
     tool-result)
 (defun workspace-tool-run-shell-command
     (command directory policy timeout output-limit &key environment)
-  "Run one already authorized shell COMMAND with fully resolved execution policy."
+  "Run one already authorized shell COMMAND with fully resolved execution policy.
+
+ENVIRONMENT is the command's complete NAME=VALUE environment, or NIL for the
+agent's own; either way the command never receives credential variables."
   (let* ((result
            (handler-bind
                ((sb-int:stream-decoding-error
@@ -252,7 +255,9 @@ existing symlinks and the nearest existing parent before checking the boundary."
                 arguments
                 :policy policy
                 :working-directory directory
-                :environment environment
+                :environment (if environment
+                                 (command-environment :base environment)
+                                 (command-environment))
                 :timeout timeout
                 :merge-output-p t
                 :output-limit output-limit
