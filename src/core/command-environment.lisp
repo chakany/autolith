@@ -56,6 +56,19 @@ or the names OVERRIDES sets, followed by OVERRIDES."
                        base)
             overrides)))
 
+(-> command-environment-call-with-private-home (function) t)
+(defun command-environment-call-with-private-home (function)
+  "Call FUNCTION with a command environment whose home is a fresh private
+directory, and return FUNCTION's values after removing that directory."
+  (let ((home (platform-make-temporary-directory
+               *platform* (uiop:temporary-directory) "autolith-command-")))
+    (unwind-protect
+         (funcall function
+                  (command-environment
+                   :overrides (command-environment-private-home home)))
+      (platform-delete-directory-tree *platform* home
+                                      :validate t :if-does-not-exist ':ignore))))
+
 (-> command-environment-private-home (pathname) list)
 (defun command-environment-private-home (home)
   "Prepare HOME as a sandboxed command's private home directory and return the

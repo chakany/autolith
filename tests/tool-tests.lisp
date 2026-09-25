@@ -671,6 +671,18 @@
                                         (declare (ignore command directory))
                                         ':full-access)))))
 
+             (with-test-fixture (:posix-shell "shell.run's private home in the agent sandbox")
+               (with-test-environment (("AUTOLITH_AGENT_SANDBOX" "active"))
+                 (let* ((home (string-right-trim
+                               "/" (uiop:native-namestring (user-homedir-pathname))))
+                        (output (tool-result-content
+                                 (run "shell" "run" "command" "printf 'HOME=%s' \"$HOME\""))))
+                   (test-assert (and (search "HOME=" output)
+                                     (search "autolith-command-" output)
+                                     (not (search (format nil "HOME=~A~%" home)
+                                                  (format nil "~A~%" output))))
+                                (format nil "full-access commands in the agent sandbox get a private home: ~A"
+                                        output)))))
              (let* ((image-path (merge-pathnames "tool-image.png" root))
                     (image (test-conversation--write-tiny-png image-path))
                     (result (run "fs" "view-image"

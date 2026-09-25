@@ -325,6 +325,10 @@ agent's own; either way the command never receives credential variables."
                     (platform-call-with-command-sandbox
                      *platform* (config :working-directory configuration) #'run))
                    (:full-access
-                    (run (external-sandbox-policy) nil)))))
+                    (if (agent-sandbox-active-p)
+                        (command-environment-call-with-private-home
+                         (lambda (environment)
+                           (run (external-sandbox-policy) environment)))
+                        (run (external-sandbox-policy) nil))))))
              :async-p async-p
              :parent-call-id (tool-context-call-id context)))))))

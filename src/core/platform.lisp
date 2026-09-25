@@ -428,15 +428,12 @@ its command and descendants before returning."))
 (defmethod platform-call-with-command-sandbox ((platform platform) workspace function)
   "Use the workspace-write policy on POSIX backends, which hides the user's home
 directory, with a private home directory that exists until FUNCTION returns."
-  (let ((home (platform-make-temporary-directory
-               platform (uiop:temporary-directory) "autolith-command-")))
-    (unwind-protect
-         (funcall function
-                  (workspace-write-sandbox-policy :workspace-roots (list workspace home))
-                  (command-environment
-                   :overrides (command-environment-private-home home)))
-      (platform-delete-directory-tree platform home
-                                      :validate t :if-does-not-exist ':ignore))))
+  (declare (ignore platform))
+  (command-environment-call-with-private-home
+   (lambda (environment)
+     (funcall function
+              (workspace-write-sandbox-policy :workspace-roots (list workspace))
+              environment))))
 
 
 ;;;; -- Local Sockets --
