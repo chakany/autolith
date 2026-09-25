@@ -104,9 +104,11 @@ different terminals still find each other."
 inside the agent sandbox for WORKSPACE and SOURCE-ROOT, starting in
 WORKING-DIRECTORY, which defaults to WORKSPACE.
 
-COMMAND is returned unchanged inside the sandbox or when the user disabled it.
-Signal AGENT-SANDBOX-UNAVAILABLE when this host has no sandbox backend."
-  (if (not (eq (agent-sandbox-state) ':enabled))
+COMMAND is returned unchanged inside the sandbox, when the user disabled it,
+and on Windows, whose launcher does not confine the agent yet. Signal
+AGENT-SANDBOX-UNAVAILABLE when this host has no sandbox backend."
+  (if (or (not (eq (agent-sandbox-state) ':enabled))
+          (uiop:os-windows-p))
       command
       (let ((plan (handler-case
                       (cl-exec-sandbox:sandbox-build-plan
