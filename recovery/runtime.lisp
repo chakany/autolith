@@ -1005,13 +1005,20 @@ generation. Its validator carries this image's own stricter checks."
 
 ;;;; -- Exact Source and Core Boot --
 
+(defparameter *recovery-git-arguments*
+  '("-c" "core.hooksPath=/dev/null" "-c" "core.fsmonitor=false")
+  "Git options every recovery Git command runs with. Recovery runs outside
+the agent sandbox, in repositories the agent may have written, so it never
+runs the hooks or file system monitor their configuration names.")
+
 (serapeum:-> recovery-git-output (pathname list) string)
 (defun recovery-git-output (repository arguments)
   "Return trimmed output from one Git command in REPOSITORY."
   (string-trim
    '(#\Space #\Tab #\Newline #\Return)
    (uiop:run-program
-    (append (list "git" "-C" (namestring repository)) arguments)
+    (append (list "git") *recovery-git-arguments* (list "-C" (namestring repository))
+            arguments)
     :output ':string
     :error-output ':output)))
 
@@ -1078,10 +1085,11 @@ generation. Its validator carries this image's own stricter checks."
         (unwind-protect
              (progn
                (uiop:run-program
-                (list "git" "clone" "--quiet" "--no-checkout"
-                      "--no-hardlinks"
-                      (namestring (recovery-context-source-root context))
-                      (namestring temporary))
+                (append (list "git")
+                        *recovery-git-arguments*
+                        (list "clone" "--quiet" "--no-checkout" "--no-hardlinks"
+                              (namestring (recovery-context-source-root context))
+                              (namestring temporary)))
                 :output ':string
                 :error-output ':output)
                (recovery-git-output temporary

@@ -394,7 +394,8 @@
   test-agent-sandbox-refuses-home-workspace
   test-agent-sandbox-enforcement
   test-agent-sandbox-launcher-command
-  test-agent-sandbox-awareness)
+  test-agent-sandbox-awareness
+  test-recovery-git-ignores-repository-commands)
 
 (define-test-suite recovery
   test-recovery-xdg-directories

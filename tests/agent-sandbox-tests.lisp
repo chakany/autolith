@@ -72,11 +72,13 @@ workspace and state, and keeps its images and source read-only."
            (secret (agent-sandbox-tests--write (merge-pathnames ".ssh/id_ed25519" home)
                                                "secret"))
            (state-root (merge-pathnames ".local/state/autolith/" home))
-           (active (merge-pathnames ".local/share/autolith/active/" home)))
+           (active (merge-pathnames ".local/share/autolith/active/" home))
+           (worktrees (merge-pathnames ".local/share/autolith/recovery-worktrees/" home)))
       (agent-sandbox-tests--write (merge-pathnames "README" source-root) "source")
       (ensure-directories-exist workspace)
       (ensure-directories-exist state-root)
       (ensure-directories-exist active)
+      (ensure-directories-exist worktrees)
       (with-test-environment (("HOME" (agent-sandbox-tests--native home))
                               ("XDG_CONFIG_HOME" nil)
                               ("XDG_DATA_HOME" nil)
@@ -111,7 +113,38 @@ workspace and state, and keeps its images and source read-only."
           (test-assert (not (allowed-p (format nil "echo x > ~A"
                                                (quoted (merge-pathnames "README"
                                                                         source-root)))))
-                       "the agent cannot modify a source root outside its workspace")))))
+                       "the agent cannot modify a source root outside its workspace")
+        (test-assert (not (allowed-p (format nil "echo x > ~A"
+                                             (quoted (merge-pathnames "config" worktrees)))))
+                     "the agent cannot write the checkouts recovery runs Git in")))))
+  nil)
+
+(-> test-recovery-git-ignores-repository-commands () null)
+(defun test-recovery-git-ignores-repository-commands ()
+  "Test that recovery's Git never runs commands a repository's configuration
+names, since recovery runs outside the sandbox in checkouts the agent wrote."
+  (with-test-fixture (:posix-shell "recovery Git outside the agent sandbox")
+    (with-test-configuration (configuration root)
+      (declare (ignore configuration))
+      (let* ((repository (merge-pathnames "repository/" root))
+             (marker (merge-pathnames "monitor-ran" root))
+             (monitor (agent-sandbox-tests--write
+                       (merge-pathnames "monitor" root)
+                       (format nil "#!/bin/sh~%touch ~A~%"
+                               (uiop:escape-sh-token (agent-sandbox-tests--native marker))))))
+        (sb-posix:chmod (uiop:native-namestring monitor) #o755)
+        (ensure-directories-exist repository)
+        (uiop:run-program (list "git" "-C" (uiop:native-namestring repository) "init" "-q"))
+        (uiop:run-program (list "git" "-C" (uiop:native-namestring repository)
+                                "config" "core.fsmonitor" (uiop:native-namestring monitor)))
+        (uiop:run-program (list "git" "-C" (uiop:native-namestring repository) "status")
+                          :output nil :error-output nil :ignore-error-status t)
+        (test-assert (probe-file marker)
+                     "plain Git runs the repository's file system monitor")
+        (delete-file marker)
+        (recovery-git-output repository '("status" "--porcelain"))
+        (test-assert (not (probe-file marker))
+                     "recovery Git never runs the repository's file system monitor"))))
   nil)
 
 (-> test-agent-sandbox-launcher-command () null)
