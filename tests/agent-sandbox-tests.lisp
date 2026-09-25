@@ -73,12 +73,16 @@ workspace and state, and keeps its images and source read-only."
                                                "secret"))
            (state-root (merge-pathnames ".local/state/autolith/" home))
            (active (merge-pathnames ".local/share/autolith/active/" home))
-           (worktrees (merge-pathnames ".local/share/autolith/recovery-worktrees/" home)))
+           (worktrees (merge-pathnames ".local/share/autolith/recovery-worktrees/" home))
+           (user-cache (merge-pathnames ".cache/common-lisp/" home))
+           (agent-cache (merge-pathnames ".cache/autolith/" home)))
       (agent-sandbox-tests--write (merge-pathnames "README" source-root) "source")
       (ensure-directories-exist workspace)
       (ensure-directories-exist state-root)
       (ensure-directories-exist active)
       (ensure-directories-exist worktrees)
+      (ensure-directories-exist user-cache)
+      (ensure-directories-exist agent-cache)
       (with-test-environment (("HOME" (agent-sandbox-tests--native home))
                               ("XDG_CONFIG_HOME" nil)
                               ("XDG_DATA_HOME" nil)
@@ -94,6 +98,13 @@ workspace and state, and keeps its images and source read-only."
                             :directory workspace
                             :output nil :error-output nil
                             :ignore-error-status t))))
+               (output (script)
+                 (uiop:run-program (agent-sandbox-wrap (list "/bin/sh" "-c" script)
+                                                       :source-root source-root
+                                                       :workspace workspace)
+                                   :directory workspace
+                                   :output ':string :error-output nil
+                                   :ignore-error-status t))
                (quoted (pathname)
                  (uiop:escape-sh-token (agent-sandbox-tests--native pathname))))
           (test-assert (not (allowed-p (format nil "cat ~A" (quoted secret))))
@@ -115,8 +126,26 @@ workspace and state, and keeps its images and source read-only."
                                                                         source-root)))))
                        "the agent cannot modify a source root outside its workspace")
         (test-assert (not (allowed-p (format nil "echo x > ~A"
+                                             (quoted (merge-pathnames "fasl" user-cache)))))
+                     "the agent cannot write the user's ASDF cache")
+        (test-assert (not (allowed-p (format nil "echo x > ~A"
                                              (quoted (merge-pathnames "config" worktrees)))))
-                     "the agent cannot write the checkouts recovery runs Git in")))))
+                     "the agent cannot write the checkouts recovery runs Git in")
+        (let* ((translations (output "printf %s \"$ASDF_OUTPUT_TRANSLATIONS\""))
+               (cache (subseq translations (min 2 (length translations)))))
+          (test-assert (and (uiop:string-prefix-p "/:" translations)
+                            (uiop:string-prefix-p
+                             (agent-sandbox-tests--native
+                              (cl-exec-sandbox::path--canonical agent-cache))
+                             (agent-sandbox-tests--native
+                              (cl-exec-sandbox::path--canonical
+                               (uiop:ensure-directory-pathname cache)))))
+                       (format nil "the agent compiles into Autolith's cache: ~A" translations))
+          (test-assert (allowed-p (format nil "mkdir -p ~A && echo x > ~A"
+                                          (uiop:escape-sh-token cache)
+                                          (uiop:escape-sh-token
+                                           (concatenate 'string cache "fasl"))))
+                       "the agent writes its compilation cache"))))))
   nil)
 
 (-> test-recovery-git-ignores-repository-commands () null)

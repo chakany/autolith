@@ -86,7 +86,6 @@ different terminals still find each other."
               (special ':slash-tmp ':write))
         (mapcar (lambda (kind) (rule (autolith-application-root kind) ':write))
                 '(:config :data :state :cache))
-        (list (rule (uiop:xdg-cache-home "common-lisp/") ':write))
         (mapcar (lambda (relative) (rule (merge-pathnames relative data-root) ':read))
                 *agent-sandbox-read-only-data*)
         (unless (uiop:subpathp source-root workspace)
@@ -112,22 +111,33 @@ AGENT-SANDBOX-UNAVAILABLE when this host has no sandbox backend."
   (if (or (not (eq (agent-sandbox-state) ':enabled))
           (uiop:os-windows-p))
       command
-      (let ((plan (handler-case
-                      (cl-exec-sandbox:sandbox-build-plan
-                       (first command) (rest command)
-                       :policy (agent-sandbox-policy :source-root source-root
-                                                     :workspace workspace)
-                       :working-directory working-directory)
-                    (cl-exec-sandbox:sandbox-unavailable (condition)
-                      (error 'agent-sandbox-unavailable
-                             :message (format nil "~A Set ~A=off to run Autolith without ~
-                                                   the sandbox."
-                                              condition *agent-sandbox-variable*))))))
+      (let* ((inner (agent-sandbox--with-compilation-cache command))
+             (plan (handler-case
+                       (cl-exec-sandbox:sandbox-build-plan
+                        (first inner) (rest inner)
+                        :policy (agent-sandbox-policy :source-root source-root
+                                                      :workspace workspace)
+                        :working-directory working-directory)
+                     (cl-exec-sandbox:sandbox-unavailable (condition)
+                       (error 'agent-sandbox-unavailable
+                              :message (format nil "~A Set ~A=off to run Autolith without ~
+                                                    the sandbox."
+                                               condition *agent-sandbox-variable*))))))
         (when (cl-exec-sandbox:sandbox-plan-cleanup-paths plan)
           (error 'agent-sandbox-unavailable
                  :message "The agent sandbox would need files the launcher cannot remove."))
         (cons (uiop:native-namestring (cl-exec-sandbox:sandbox-plan-program plan))
               (cl-exec-sandbox:sandbox-plan-arguments plan)))))
+
+(serapeum:-> agent-sandbox-compilation-cache () pathname)
+(defun agent-sandbox-compilation-cache ()
+  "Return the directory where ASDF compiles Lisp inside the agent sandbox.
+
+The user's own ASDF cache is hidden, because unconfined programs, recovery
+among them, load compiled files from it: a file the agent compiled there could
+run outside the sandbox. The agent compiles into Autolith's cache instead."
+  (merge-pathnames (format nil "common-lisp/~A/" (uiop:implementation-identifier))
+                   (autolith-application-root :cache)))
 
 (serapeum:-> agent-sandbox-print-command (pathname list) integer)
 (defun agent-sandbox-print-command (source-root command)
@@ -149,6 +159,18 @@ process status: 0, or 1 after explaining why the sandbox is unavailable."
 
 
 ;;;; -- Private Functions --
+
+(serapeum:-> agent-sandbox--with-compilation-cache (list) list)
+(defun agent-sandbox--with-compilation-cache (command)
+  "Return COMMAND run through env with ASDF compiling into the agent's cache."
+  (let ((cache (uiop:native-namestring (agent-sandbox-compilation-cache))))
+    (when (find #\: cache)
+      (error 'agent-sandbox-unavailable
+             :message (format nil "The agent compilation cache ~A contains a colon, which ~
+                                   ASDF_OUTPUT_TRANSLATIONS cannot express."
+                              cache)))
+    (append (list "/usr/bin/env" (format nil "ASDF_OUTPUT_TRANSLATIONS=/:~A" cache))
+            command)))
 
 (serapeum:-> agent-sandbox--runtime-rules () list)
 (defun agent-sandbox--runtime-rules ()

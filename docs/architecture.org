@@ -290,7 +290,10 @@ stable launcher
   bundled installer and restarts. 
 - The launcher asks the recovery image for the sandboxed command with
   =--agent-sandbox-command= and runs it with =AUTOLITH_AGENT_SANDBOX=active=,
-  so a launcher started inside the sandbox runs its agent directly. A sandbox
+  so a launcher started inside the sandbox runs its agent directly. Inside,
+  ASDF compiles into Autolith's cache root, never the user's ASDF cache, which
+  unconfined programs such as recovery load from, and recovery's Git ignores
+  repository hooks and file system monitors. A sandbox
   that cannot start ends the launch with status 64 instead of running the
   agent unconfined. Recovery confines each generation or clean source it
   boots the same way.
