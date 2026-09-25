@@ -1,6 +1,7 @@
 (in-package #:autolith)
 
 (load (merge-pathnames "../script/roots.lisp" *load-truename*))
+(load (merge-pathnames "sandbox.lisp" *load-truename*))
 
 ;;;; -- Recovery State --
 
@@ -1149,13 +1150,17 @@ generation. Its validator carries this image's own stricter checks."
     (recovery-prepare-source-environment context worktree)
     (let ((process
             (uiop:launch-program
-             (append
-              (list sbcl-command
-                    "--noinform"
-                    "--core"
-                    (namestring (recovery-generation-core-pathname generation))
-                    "--end-runtime-options")
-              forwarded-arguments)
+             (agent-sandbox-wrap
+              (append
+               (list sbcl-command
+                     "--noinform"
+                     "--core"
+                     (namestring (recovery-generation-core-pathname generation))
+                     "--end-runtime-options")
+               forwarded-arguments)
+              :source-root worktree
+              :workspace (uiop:getcwd)
+              :working-directory worktree)
              :directory worktree
              :input ':interactive
              :output ':interactive
@@ -1183,11 +1188,15 @@ generation. Its validator carries this image's own stricter checks."
     (unwind-protect
          (let ((process
                  (uiop:launch-program
-                  (append (list sbcl-command
-                                "--noinform"
-                                "--script"
-                                (namestring launcher))
-                          forwarded-arguments)
+                  (agent-sandbox-wrap
+                   (append (list sbcl-command
+                                 "--noinform"
+                                 "--script"
+                                 (namestring launcher))
+                           forwarded-arguments)
+                   :source-root checkout
+                   :workspace (uiop:getcwd)
+                   :working-directory checkout)
                   :directory checkout
                   :input ':interactive
                   :output ':interactive
@@ -1360,6 +1369,9 @@ generation. Its validator carries this image's own stricter checks."
           (uiop:ensure-directory-pathname
            (or (first arguments)
                (error "The recovery image needs the source root.")))))
+    (when (equal (second arguments) "--agent-sandbox-command")
+      (return-from recovery-run
+        (agent-sandbox-print-command source-root (nthcdr 2 arguments))))
     (if (equal (rest arguments) '("--probe"))
         (progn
           (let ((*print-readably* t))

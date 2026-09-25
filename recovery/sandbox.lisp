@@ -1,0 +1,177 @@
+(in-package #:autolith)
+
+;;;; -- Agent Sandbox --
+
+;;; The pristine recovery image confines every process that runs mutable
+;;; Autolith code: the active image the launcher starts, and each generation
+;;; or clean source it boots itself. The agent may modify itself, so the
+;;; confinement lives here, in the image the agent cannot change, and in the
+;;; launcher that asks for it. Commands and Lisp workers the agent starts
+;;; inherit the sandbox. It hides the user's home directory, where SSH keys,
+;;; cloud tokens, and other logins live, and keeps the launcher, the recovery
+;;; image, and the installed runtimes read-only, so a modified agent cannot
+;;; replace what starts it next time.
+
+(defparameter *agent-sandbox-variable* "AUTOLITH_AGENT_SANDBOX"
+  "The environment variable recording the agent sandbox state: \"active\"
+inside the sandbox, so nested launches are not wrapped again, or \"off\" when
+the user runs Autolith unconfined.")
+
+(defparameter *agent-sandbox-read-only-data* '("active/" "recovery/" "runtimes/")
+  "Directories below the data root the agent may read but never replace: the
+active and recovery images and the installed runtimes the launcher starts.")
+
+(defparameter *agent-sandbox-home-read-paths*
+  '("quicklisp/" "common-lisp/" ".codex/auth.json" ".grok/auth.json")
+  "Paths below the home directory the agent reads: its Lisp dependency
+stores, and the provider logins it imports until the launcher brokers them.")
+
+
+;;;; -- Public Functions --
+
+(serapeum:-> agent-sandbox-state () (member :enabled :active :off))
+(defun agent-sandbox-state ()
+  "Return :ACTIVE inside the agent sandbox, :OFF when the user disabled it, and
+:ENABLED when a process launched now must be confined."
+  (let ((value (uiop:getenv *agent-sandbox-variable*)))
+    (cond
+      ((equal value "active")
+       ':active)
+      ((equal value "off")
+       ':off)
+      (t
+       ':enabled))))
+
+(serapeum:-> agent-sandbox-policy
+    (&key (:source-root pathname) (:workspace pathname))
+    cl-exec-sandbox:sandbox-policy)
+(defun agent-sandbox-policy (&key source-root workspace)
+  "Return the sandbox policy for an agent working in WORKSPACE with the tracked
+source at SOURCE-ROOT.
+
+The agent may write its workspace, Autolith's own configuration, data, state,
+and cache roots, and temporary directories. The source root is read-only
+unless it is the workspace itself, the images and runtimes the launcher starts
+are always read-only, and the rest of the home directory is hidden. The
+network stays open, and processes are not isolated, so sessions started from
+different terminals still find each other."
+  (let* ((home (uiop:ensure-directory-pathname (user-homedir-pathname)))
+         (workspace (uiop:ensure-directory-pathname workspace))
+         (data-root (autolith-application-root :data)))
+    (when (uiop:subpathp home workspace)
+      (error 'agent-sandbox-unavailable
+             :message (format nil "Autolith works in ~A, which contains the home directory ~
+                                   it would hide. Start it in a project directory, or set ~
+                                   ~A=off to run it without the sandbox."
+                              (uiop:native-namestring workspace)
+                              *agent-sandbox-variable*)))
+    (flet ((rule (path access)
+             (cl-exec-sandbox:make-filesystem-rule :kind ':path :path path :access access))
+           (special (path access)
+             (cl-exec-sandbox:make-filesystem-rule :kind ':special :path path :access access)))
+      (cl-exec-sandbox:make-sandbox-policy
+       :network ':enabled
+       :isolate-processes-p nil
+       :workspace-roots (list workspace)
+       :protected-metadata-names nil
+       :filesystem-rules
+       (append
+        (list (special ':root ':read)
+              (special ':home ':deny)
+              (special ':search-path ':read)
+              (special ':workspace-roots ':write)
+              (special ':tmpdir ':write)
+              (special ':slash-tmp ':write))
+        (mapcar (lambda (kind) (rule (autolith-application-root kind) ':write))
+                '(:config :data :state :cache))
+        (list (rule (uiop:xdg-cache-home "common-lisp/") ':write))
+        (mapcar (lambda (relative) (rule (merge-pathnames relative data-root) ':read))
+                *agent-sandbox-read-only-data*)
+        (unless (uiop:subpathp source-root workspace)
+          (list (rule source-root ':read)))
+        (loop for relative in *agent-sandbox-home-read-paths*
+              for path = (merge-pathnames relative home)
+              when (probe-file path)
+                collect (rule path ':read))
+        (agent-sandbox--runtime-rules))))))
+
+(serapeum:-> agent-sandbox-wrap
+    (list &key (:source-root pathname) (:workspace pathname)
+               (:working-directory pathname))
+    list)
+(defun agent-sandbox-wrap (command &key source-root workspace (working-directory workspace))
+  "Return the argument vector that runs COMMAND, a program and its arguments,
+inside the agent sandbox for WORKSPACE and SOURCE-ROOT, starting in
+WORKING-DIRECTORY, which defaults to WORKSPACE.
+
+COMMAND is returned unchanged inside the sandbox or when the user disabled it.
+Signal AGENT-SANDBOX-UNAVAILABLE when this host has no sandbox backend."
+  (if (not (eq (agent-sandbox-state) ':enabled))
+      command
+      (let ((plan (handler-case
+                      (cl-exec-sandbox:sandbox-build-plan
+                       (first command) (rest command)
+                       :policy (agent-sandbox-policy :source-root source-root
+                                                     :workspace workspace)
+                       :working-directory working-directory)
+                    (cl-exec-sandbox:sandbox-unavailable (condition)
+                      (error 'agent-sandbox-unavailable
+                             :message (format nil "~A Set ~A=off to run Autolith without ~
+                                                   the sandbox."
+                                              condition *agent-sandbox-variable*))))))
+        (when (cl-exec-sandbox:sandbox-plan-cleanup-paths plan)
+          (error 'agent-sandbox-unavailable
+                 :message "The agent sandbox would need files the launcher cannot remove."))
+        (cons (uiop:native-namestring (cl-exec-sandbox:sandbox-plan-program plan))
+              (cl-exec-sandbox:sandbox-plan-arguments plan)))))
+
+(serapeum:-> agent-sandbox-print-command (pathname list) integer)
+(defun agent-sandbox-print-command (source-root command)
+  "Write the sandboxed argument vector for COMMAND to standard output, each
+argument followed by a NUL character, for the launcher to run. Return the
+process status: 0, or 1 after explaining why the sandbox is unavailable."
+  (handler-case
+      (let ((wrapped (agent-sandbox-wrap command
+                                         :source-root source-root
+                                         :workspace (uiop:getcwd))))
+        (dolist (argument wrapped)
+          (write-string argument)
+          (write-char (code-char 0)))
+        (finish-output)
+        0)
+    (agent-sandbox-unavailable (condition)
+      (format *error-output* "Autolith cannot start its sandbox: ~A~%" condition)
+      1)))
+
+
+;;;; -- Private Functions --
+
+(serapeum:-> agent-sandbox--runtime-rules () list)
+(defun agent-sandbox--runtime-rules ()
+  "Return read rules for the SBCL runtime and dependency setup the environment
+names, which may live below the hidden home directory."
+  (loop for (variable . directory-p) in '(("AUTOLITH_SBCL" . nil)
+                                          ("SBCL_HOME" . t)
+                                          ("AUTOLITH_PROJECT_SETUP" . nil))
+        for value = (uiop:getenv variable)
+        for path = (and value
+                        (uiop:absolute-pathname-p (pathname value))
+                        (if directory-p
+                            (uiop:ensure-directory-pathname value)
+                            (uiop:pathname-directory-pathname value)))
+        when (and path (probe-file path))
+          collect (cl-exec-sandbox:make-filesystem-rule :kind ':path
+                                                        :path path
+                                                        :access ':read)))
+
+
+;;;; -- Conditions --
+
+(define-condition agent-sandbox-unavailable (error)
+  ((message
+    :initarg :message
+    :reader agent-sandbox-unavailable-message
+    :documentation "Why the agent cannot be started inside its sandbox."))
+  (:documentation "Signaled when the agent sandbox cannot confine a launch.")
+  (:report (lambda (condition stream)
+             (write-string (agent-sandbox-unavailable-message condition) stream))))

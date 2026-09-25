@@ -43,6 +43,7 @@
              (load quicklisp-setup)
              (uiop:symbol-call '#:ql '#:quickload :serapeum :silent t)
              (uiop:symbol-call '#:ql '#:quickload :sbcl-generations :silent t)
+             (uiop:symbol-call '#:ql '#:quickload :cl-exec-sandbox :silent t)
              (let ((package (or (find-package "AUTOLITH")
                                 (make-package "AUTOLITH" :use '("CL")))))
                (export (mapcar (lambda (name) (intern name package))
@@ -71,6 +72,7 @@
              (let* ((paths '("script/build-recovery"
                              "script/build-recovery.lisp"
                              "recovery/runtime.lisp"
+                             "recovery/sandbox.lisp"
                              "recovery/launcher.lisp"
                              "bin/autolith"
                              "bin/autolith-active"
@@ -85,6 +87,7 @@
                (list :source-commit (git-output '("rev-parse" "HEAD"))
                      :source-clean-p (zerop (length status))
                      :runtime-blob (source-blob "recovery/runtime.lisp")
+                     :sandbox-blob (source-blob "recovery/sandbox.lisp")
                      :builder-blob (source-blob "script/build-recovery")
                      :builder-source-blob
                      (source-blob "script/build-recovery.lisp")

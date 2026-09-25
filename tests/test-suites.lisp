@@ -389,6 +389,12 @@
   test-image-commit-surface-battery
   test-image-commit-replay-probe)
 
+(define-test-suite agent-sandbox
+  test-agent-sandbox-state
+  test-agent-sandbox-refuses-home-workspace
+  test-agent-sandbox-enforcement
+  test-agent-sandbox-launcher-command)
+
 (define-test-suite recovery
   test-recovery-xdg-directories
   test-recovery-conversation-identifiers

@@ -300,6 +300,7 @@
                               (:file "management-repl-tests")
                              (:file "active-image-tests")
                              (:file "recovery-tests")
+                             (:file "agent-sandbox-tests")
                              (:file "lisp-worker-tests")
                              (:file "self-tool-tests")
                                (:file "device-authentication-tests")
