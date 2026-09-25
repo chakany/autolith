@@ -131,6 +131,13 @@ workspace and state, and keeps its images and source read-only."
         (test-assert (not (allowed-p (format nil "echo x > ~A"
                                              (quoted (merge-pathnames "config" worktrees)))))
                      "the agent cannot write the checkouts recovery runs Git in")
+        (dolist (relative '("installation/current" "nix/images/active" "helpers/helper"))
+          (let ((target (merge-pathnames relative (merge-pathnames ".local/share/autolith/"
+                                                                   home))))
+            (ensure-directories-exist target)
+            (test-assert (not (allowed-p (format nil "echo x > ~A"
+                                                 (quoted (merge-pathnames "file" target)))))
+                         (format nil "the agent cannot write the launcher's ~A" relative))))
         (let* ((translations (output "printf %s \"$ASDF_OUTPUT_TRANSLATIONS\""))
                (cache (subseq translations (min 2 (length translations)))))
           (test-assert (and (uiop:string-prefix-p "/:" translations)

@@ -18,10 +18,13 @@ inside the sandbox, so nested launches are not wrapped again, or \"off\" when
 the user runs Autolith unconfined.")
 
 (defparameter *agent-sandbox-read-only-data*
-  '("active/" "recovery/" "runtimes/" "recovery-worktrees/")
-  "Directories below the data root the agent may read but never replace: the
-active and recovery images and the installed runtimes the launcher starts, and
-the checkouts where unconfined recovery runs Git.")
+  '("active/" "recovery/" "runtimes/" "recovery-worktrees/" "installation/" "nix/"
+    "helpers/")
+  "Directories below the data root the agent may read but never replace: what
+unconfined programs start or load. These are the active and recovery images,
+the installed runtimes and releases, the Nix images and the compiled files
+their builder loads, the sandbox helpers, and the checkouts where recovery runs
+Git.")
 
 (defparameter *agent-sandbox-home-read-paths*
   '("quicklisp/" "common-lisp/" ".codex/auth.json" ".grok/auth.json")
