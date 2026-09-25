@@ -209,6 +209,37 @@ Windows supports supervised detached sessions, client-first starts, and exact-he
 restart checkpoints. It withholds fork-based checkpoint saving and the =unix=
 management REPL transport.
 
+* Agent sandbox
+
+On macOS and Linux the launcher starts Autolith inside a sandbox: Seatbelt on
+macOS and Bubblewrap on Linux. The sandbox confines Autolith itself, its Lisp
+workers, and every command it runs, so a mistaken command or a broken
+self-modification cannot damage the rest of the machine. It guards against
+accidents, not against hostile code.
+
+Inside the sandbox:
+
+- Your home directory is hidden, with its SSH keys, cloud tokens, and tool
+  logins. The exceptions are the workspace, Autolith's own configuration,
+  data, state, and cache directories, the directories on =PATH=,
+  =~/quicklisp= and =~/common-lisp=, and the Codex and Grok logins Autolith
+  imports.
+- Autolith may write its workspace, its own directories, and temporary
+  directories. The active and recovery images, the installed runtimes, and a
+  source checkout outside the workspace stay read-only, so a modified
+  Autolith cannot replace what starts it next time.
+- The network is open.
+- Commands run with full access by default, because the sandbox already
+  confines them. Choose =/permissions ask= or =/permissions auto= to be
+  asked instead; the choice persists. There is no separate =sandbox= choice.
+- Each command receives a private, empty home directory carrying only your
+  Git name and email, and never the environment variables that hold
+  credentials, such as API keys and tokens.
+
+Start Autolith in a project directory: the sandbox refuses a workspace that is
+your home directory or contains it. Set =AUTOLITH_AGENT_SANDBOX=off= to run
+Autolith without the sandbox. Windows does not confine Autolith yet.
+
 * Talk to Autolith
 
 ** Prose, Lisp, and commands

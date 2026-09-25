@@ -34,7 +34,10 @@ developers, but I consider correct for self-modifiability.
 #+END_SRC
 
 - The *stable launcher* checks runtime and source provenance, then starts
-  the active image or recovery
+  the active image or recovery. On macOS and Linux it starts the active image
+  inside the *agent sandbox*, whose policy the pristine recovery image
+  computes (=recovery/sandbox.lisp=), because the agent may modify itself and
+  so cannot be trusted to confine itself
 - The *active image* operates the session: input, provider turns, tools, and
   the live terminal region
 - *Workers* handle search (the special fff worker) and =lisp.*= REPLs.
@@ -160,8 +163,13 @@ provider request --> semantic events --> agent --> validated tool calls
 
 * Workspace and workers
 
-- Command execution uses =platform-call-with-command-sandbox= to own policy
-  construction and scope cleanup. =cl-exec-sandbox= selects the backend:
+- Inside the agent sandbox every command and worker inherits that sandbox.
+  Commands then run with full access by default, no command sandbox is
+  offered, and each command receives a private home
+  (=command-environment-call-with-private-home=). Every command environment
+  drops credential variables.
+- Outside it, command execution uses =platform-call-with-command-sandbox= to
+  own policy construction and scope cleanup. =cl-exec-sandbox= selects the backend:
   - Bubblewrap on Linux
   - Seatbelt via =sandbox-exec= on macOS
   - AppContainer, a restricted token, scoped ACLs, and a Job Object on Windows
@@ -280,6 +288,12 @@ stable launcher
 - Updates validate provenance and refresh a readable availability cache.
   Startup reads cached state only. An accepted packaged update runs the
   bundled installer and restarts. 
+- The launcher asks the recovery image for the sandboxed command with
+  =--agent-sandbox-command= and runs it with =AUTOLITH_AGENT_SANDBOX=active=,
+  so a launcher started inside the sandbox runs its agent directly. A sandbox
+  that cannot start ends the launch with status 64 instead of running the
+  agent unconfined. Recovery confines each generation or clean source it
+  boots the same way.
 - Recovery reports sanitized crash context. Automatic failure recovery boots
   current committed source without private mutations or user init. Explicit
   generation selection and rollback retain their saved-state path
