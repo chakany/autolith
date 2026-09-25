@@ -138,21 +138,29 @@ workspace and state, and keeps its images and source read-only."
             (test-assert (not (allowed-p (format nil "echo x > ~A"
                                                  (quoted (merge-pathnames "file" target)))))
                          (format nil "the agent cannot write the launcher's ~A" relative))))
-        (let* ((translations (output "printf %s \"$ASDF_OUTPUT_TRANSLATIONS\""))
-               (cache (subseq translations (min 2 (length translations)))))
-          (test-assert (and (uiop:string-prefix-p "/:" translations)
-                            (uiop:string-prefix-p
-                             (agent-sandbox-tests--native
-                              (cl-exec-sandbox::path--canonical agent-cache))
-                             (agent-sandbox-tests--native
-                              (cl-exec-sandbox::path--canonical
-                               (uiop:ensure-directory-pathname cache)))))
-                       (format nil "the agent compiles into Autolith's cache: ~A" translations))
-          (test-assert (allowed-p (format nil "mkdir -p ~A && echo x > ~A"
-                                          (uiop:escape-sh-token cache)
-                                          (uiop:escape-sh-token
-                                           (concatenate 'string cache "fasl"))))
-                       "the agent writes its compilation cache"))))))
+        (let ((cache-home (output "printf %s \"$XDG_CACHE_HOME\"")))
+          (test-assert (uiop:string-prefix-p
+                        (agent-sandbox-tests--native
+                         (cl-exec-sandbox::path--canonical agent-cache))
+                        (agent-sandbox-tests--native
+                         (cl-exec-sandbox::path--canonical
+                          (uiop:ensure-directory-pathname cache-home))))
+                       (format nil "the agent's caches live in Autolith's cache: ~A" cache-home))
+          (test-assert (allowed-p (format nil "mkdir -p ~A/common-lisp && echo x > ~A/common-lisp/fasl"
+                                          (uiop:escape-sh-token cache-home)
+                                          (uiop:escape-sh-token cache-home)))
+                       "the agent writes its ASDF cache"))
+        (let ((nix-cache (merge-pathnames ".local/share/autolith/nix/asdf-cache/identity/" home)))
+          (ensure-directories-exist nix-cache)
+          (with-test-environment (("AUTOLITH_ASDF_CACHE" (agent-sandbox-tests--native nix-cache)))
+            (let ((redirected (output "printf %s \"$AUTOLITH_ASDF_CACHE\"")))
+              (test-assert (and (search "agent-sandbox" redirected)
+                                (search "identity" redirected))
+                           (format nil "a Nix installation's Autolith cache is the agent's own: ~A"
+                                   redirected))
+              (test-assert (not (allowed-p (format nil "echo x > ~A"
+                                                   (quoted (merge-pathnames "fasl" nix-cache)))))
+                           "the agent cannot write the cache the Nix image builder loads"))))))))
   nil)
 
 (-> test-recovery-git-ignores-repository-commands () null)

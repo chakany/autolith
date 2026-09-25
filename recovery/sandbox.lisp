@@ -114,7 +114,7 @@ AGENT-SANDBOX-UNAVAILABLE when this host has no sandbox backend."
   (if (or (not (eq (agent-sandbox-state) ':enabled))
           (uiop:os-windows-p))
       command
-      (let* ((inner (agent-sandbox--with-compilation-cache command))
+      (let* ((inner (agent-sandbox--with-environment command))
              (plan (handler-case
                        (cl-exec-sandbox:sandbox-build-plan
                         (first inner) (rest inner)
@@ -132,15 +132,16 @@ AGENT-SANDBOX-UNAVAILABLE when this host has no sandbox backend."
         (cons (uiop:native-namestring (cl-exec-sandbox:sandbox-plan-program plan))
               (cl-exec-sandbox:sandbox-plan-arguments plan)))))
 
-(serapeum:-> agent-sandbox-compilation-cache () pathname)
-(defun agent-sandbox-compilation-cache ()
-  "Return the directory where ASDF compiles Lisp inside the agent sandbox.
+(serapeum:-> agent-sandbox-cache-home () pathname)
+(defun agent-sandbox-cache-home ()
+  "Return the XDG cache home of processes inside the agent sandbox.
 
-The user's own ASDF cache is hidden, because unconfined programs, recovery
-among them, load compiled files from it: a file the agent compiled there could
-run outside the sandbox. The agent compiles into Autolith's cache instead."
-  (merge-pathnames (format nil "common-lisp/~A/" (uiop:implementation-identifier))
-                   (autolith-application-root :cache)))
+The user's own caches are hidden, because unconfined programs, recovery among
+them, load compiled files from the ASDF cache there: a file the agent compiled
+into it could run outside the sandbox. Inside, ASDF's default cache and
+Autolith's cache root both follow this directory, below Autolith's own cache,
+whatever output translations the runtime installs."
+  (merge-pathnames "agent-sandbox/" (autolith-application-root :cache)))
 
 (serapeum:-> agent-sandbox-print-command (pathname list) integer)
 (defun agent-sandbox-print-command (source-root command)
@@ -163,17 +164,29 @@ process status: 0, or 1 after explaining why the sandbox is unavailable."
 
 ;;;; -- Private Functions --
 
-(serapeum:-> agent-sandbox--with-compilation-cache (list) list)
-(defun agent-sandbox--with-compilation-cache (command)
-  "Return COMMAND run through env with ASDF compiling into the agent's cache."
-  (let ((cache (uiop:native-namestring (agent-sandbox-compilation-cache))))
-    (when (find #\: cache)
-      (error 'agent-sandbox-unavailable
-             :message (format nil "The agent compilation cache ~A contains a colon, which ~
-                                   ASDF_OUTPUT_TRANSLATIONS cannot express."
-                              cache)))
-    (append (list "/usr/bin/env" (format nil "ASDF_OUTPUT_TRANSLATIONS=/:~A" cache))
-            command)))
+(serapeum:-> agent-sandbox--with-environment (list) list)
+(defun agent-sandbox--with-environment (command)
+  "Return COMMAND run through env with every cache inside the agent sandbox.
+
+A Nix installation compiles Autolith's source into AUTOLITH_ASDF_CACHE, which
+its unconfined image builder also loads, so the agent gets its own there too."
+  (let* ((cache-home (agent-sandbox-cache-home))
+         (nix-cache (uiop:getenv "AUTOLITH_ASDF_CACHE"))
+         (nix-identity (and nix-cache
+                            (plusp (length nix-cache))
+                            (first (last (pathname-directory
+                                          (uiop:ensure-directory-pathname nix-cache))))))
+         (bindings
+           (list (format nil "XDG_CACHE_HOME=~A"
+                         (string-right-trim "/" (uiop:native-namestring cache-home))))))
+    (when nix-identity
+      (setf bindings
+            (append bindings
+                    (list (format nil "AUTOLITH_ASDF_CACHE=~A"
+                                  (uiop:native-namestring
+                                   (merge-pathnames (format nil "nix-asdf/~A/" nix-identity)
+                                                    cache-home)))))))
+    (append (list "/usr/bin/env") bindings command)))
 
 (serapeum:-> agent-sandbox--runtime-rules () list)
 (defun agent-sandbox--runtime-rules ()
