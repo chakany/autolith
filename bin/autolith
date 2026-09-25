@@ -148,7 +148,7 @@ finish_launcher()
 run_recovery()
 {
   if [[ -f "$recovery_core" && -f "$recovery_manifest" ]] &&
-     grep -Eq '^\(:RECOVERY-IMAGE :VERSION 2([[:space:]]|$)' "$recovery_manifest" &&
+     grep -Eq '^\(:RECOVERY-IMAGE :VERSION 3([[:space:]]|$)' "$recovery_manifest" &&
      "$sbcl_command" --noinform --core "$recovery_core" \
        --end-runtime-options "$source_root" --probe >/dev/null 2>&1; then
     "$sbcl_command" --noinform --core "$recovery_core" \
@@ -170,15 +170,50 @@ active_image_valid()
        --autolith-internal-active-image-probe >/dev/null 2>&1
 }
 
+# Run one agent process inside the agent sandbox, which the pristine recovery
+# image computes: the agent may modify itself, so what confines it must not be
+# part of it. A launcher already inside the sandbox, as a detached session's
+# is, runs the process directly, and AUTOLITH_AGENT_SANDBOX=off disables it.
+# A sandbox that cannot start is a setup failure, status 64, not a crash for
+# recovery to handle.
+run_agent()
+{
+  local plan
+  local argument
+  local wrapped=()
+
+  case ${AUTOLITH_AGENT_SANDBOX:-} in
+    active|off)
+      "$@"
+      return $?
+      ;;
+  esac
+  plan=$(mktemp "${TMPDIR:-/tmp}/autolith-sandbox.XXXXXX") || return 64
+  if ! run_recovery --agent-sandbox-command "$@" > "$plan"; then
+    rm -f -- "$plan"
+    return 64
+  fi
+  while IFS= read -r -d '' argument; do
+    wrapped+=("$argument")
+  done < "$plan"
+  rm -f -- "$plan"
+  if [[ ${#wrapped[@]} -eq 0 ]]; then
+    printf '%sAutolith could not start its sandbox.%s\n' \
+      "$launcher_failure" "$launcher_reset" >&2
+    return 64
+  fi
+  AUTOLITH_AGENT_SANDBOX=active "${wrapped[@]}"
+}
+
 run_active_core()
 {
-  "$sbcl_command" --noinform --core "$active_core" \
+  run_agent "$sbcl_command" --noinform --core "$active_core" \
     --end-runtime-options "$source_root" "$@"
 }
 
 run_active_source()
 {
-  "$sbcl_command" --script "$source_root/bin/autolith-active" "$@"
+  run_agent "$sbcl_command" --script "$source_root/bin/autolith-active" "$@"
 }
 
 refresh_runtime_command()

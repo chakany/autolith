@@ -336,7 +336,7 @@
     (and (probe-file core)
          (probe-file (launcher-context-recovery-manifest context))
          (launcher-manifest-header-p (launcher-context-recovery-manifest context)
-                                     "(:RECOVERY-IMAGE :VERSION 2")
+                                     "(:RECOVERY-IMAGE :VERSION 3")
          (zerop (launcher-run (launcher-core-command context core "--probe")
                               :output nil :error-output nil)))))
 

@@ -5,7 +5,7 @@
 
 ;;;; -- Recovery State --
 
-(defparameter *recovery-image-protocol-version* 2
+(defparameter *recovery-image-protocol-version* 3
   "The launcher handshake version implemented by this pristine recovery image.")
 
 (defparameter *recovery-rollback-status* 75

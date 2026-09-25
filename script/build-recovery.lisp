@@ -122,7 +122,7 @@
                     (trailing (read stream nil end-marker)))
                (unless (and (listp form)
                             (eq (first form) :recovery-probe)
-                            (= (or (getf (rest form) :version) 0) 2)
+                            (= (or (getf (rest form) :version) 0) 3)
                             (string= (or (getf (rest form) :sbcl-version) "")
                                      (lisp-implementation-version))
                             (string= (or (getf (rest form) :operating-system) "")
@@ -154,7 +154,7 @@
                        (*print-pretty* nil)
                        (*print-readably* t))
                    (prin1 (append (list :recovery-image
-                                        :version 2
+                                        :version 3
                                         :core (namestring pathname)
                                         :sbcl-version
                                         (lisp-implementation-version)

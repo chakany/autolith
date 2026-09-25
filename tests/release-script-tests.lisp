@@ -71,11 +71,12 @@
   "Run COMMAND with optional ENVIRONMENT assignments and return its output.
 
 Expected failures capture their diagnostics separately, so a tolerant caller
-can assert on the exact failure message through the second return value."
+can assert on the exact failure message through the second return value.
+Launcher fixtures exercise launch mechanics with fake runtimes, so the agent
+sandbox is off unless ENVIRONMENT turns it back on; the agent sandbox tests
+cover confinement."
   (uiop:run-program
-   (if environment
-       (append (list "env") environment command)
-       command)
+   (append (list "env" "AUTOLITH_AGENT_SANDBOX=off") environment command)
    :directory directory
    :ignore-error-status ignore-error-status
    :output output
@@ -609,6 +610,24 @@ printf 'subprocess %s\\n' \"$*\" >> \"${AUTOLITH_TEST_EVENT_LOG:?}\"
      fake-sbcl
      "#!/bin/sh
 set -eu
+case \" $* \" in
+  *\" --agent-sandbox-command \"*)
+    if [ -n \"${AUTOLITH_TEST_SANDBOX_FAILURE:-}\" ]; then
+      printf 'fixture sandbox unavailable\\n' >&2
+      exit 1
+    fi
+    wrapping=false
+    for argument in \"$@\"; do
+      if [ \"$wrapping\" = true ]; then
+        printf '%s\\0' \"$argument\"
+      elif [ \"$argument\" = --agent-sandbox-command ]; then
+        wrapping=true
+        printf '%s\\0' env FIXTURE_WRAPPED=1
+      fi
+    done
+    exit 0
+    ;;
+esac
 printf 'SBCL %s\\n' \"$*\" >> \"$AUTOLITH_TEST_LOG\"
 mode=UNKNOWN
 probe=false
@@ -623,6 +642,7 @@ if [ \"$probe\" = true ]; then
   exit 0
 fi
 printf '%s %s\\n' \"$mode\" \"$*\"
+printf 'SANDBOX=%s WRAPPED=%s\\n' \"${AUTOLITH_AGENT_SANDBOX:-}\" \"${FIXTURE_WRAPPED:-}\"
 case \" $* \" in
   *\" fixture-update \"*) exit 76 ;;
   *\" fixture-data-failure \"*) exit 1 ;;
@@ -641,7 +661,8 @@ printf '(:ACTIVE-IMAGE :VERSION 1\\n)\\n' > \"$active/manifest.sexp\"
     (dolist (pathname (list launcher fake-sbcl bootstrap))
       (release-script-tests--chmod "755" pathname))
     (let* ((environment
-             (list (format nil "XDG_DATA_HOME=~A" (namestring data-home))
+             (list "AUTOLITH_AGENT_SANDBOX=off"
+                   (format nil "XDG_DATA_HOME=~A" (namestring data-home))
                    (format nil "XDG_STATE_HOME=~A" (namestring state-home))
                    (format nil "AUTOLITH_SBCL=~A" (namestring fake-sbcl))
                    (format nil "AUTOLITH_TEST_LOG=~A" (namestring log))))
@@ -654,8 +675,26 @@ printf '(:ACTIVE-IMAGE :VERSION 1\\n)\\n' > \"$active/manifest.sexp\"
             (not (search "fast startup image" source-output))
             (not (search "--from-source" (uiop:read-file-string log))))
        "--from-source quietly bypasses images and is not forwarded")
+      (let ((sandboxed-environment
+              (cons "AUTOLITH_AGENT_SANDBOX=" (rest environment))))
+        (test-assert
+         (search "SANDBOX=active WRAPPED=1"
+                 (release-script-tests--run
+                  (list (namestring launcher) "--from-source")
+                  :environment sandboxed-environment))
+         "the launcher runs the agent in the command the recovery image wraps")
+        (multiple-value-bind (output error-output status)
+            (release-script-tests--run
+             (list (namestring launcher) "--from-source")
+             :environment (cons "AUTOLITH_TEST_SANDBOX_FAILURE=1" sandboxed-environment)
+             :ignore-error-status t)
+          (test-assert (and (= status 64)
+                            (not (search "SOURCE" output))
+                            (search "fixture sandbox unavailable" error-output))
+                       "an unavailable sandbox refuses to start the agent unconfined")))
       (let* ((fallback-environment
-               (list (format nil "HOME=~A" (namestring home))
+               (list "AUTOLITH_AGENT_SANDBOX=off"
+                     (format nil "HOME=~A" (namestring home))
                      "XDG_DATA_HOME=relative/data"
                      "XDG_STATE_HOME=relative/state"
                      (format nil "AUTOLITH_SBCL=~A" (namestring fake-sbcl))
@@ -1503,7 +1542,7 @@ printf 'RUNTIME=%s\\n' \"$*\" >> \"$AUTOLITH_TEST_LOG\"
        "(:ACTIVE-IMAGE :VERSION 1)\n")
       (release-script-tests--write-file
        (merge-pathnames "manifest.sexp" recovery-root)
-       "(:RECOVERY-IMAGE :VERSION 2)\n")
+       "(:RECOVERY-IMAGE :VERSION 3)\n")
       (release-script-tests--write-file
        (merge-pathnames "autolith/release-images" data-home)
        (format nil "~A:x86_64-linux~%" tag)))
@@ -1709,7 +1748,7 @@ mv -Tf \"$temporary\" \"$AUTOLITH_INSTALL_ROOT/current\"
        "(:ACTIVE-IMAGE :VERSION 1)\n")
       (release-script-tests--write-file
        (merge-pathnames "manifest.sexp" recovery-root)
-       "(:RECOVERY-IMAGE :VERSION 2)\n")
+       "(:RECOVERY-IMAGE :VERSION 3)\n")
       (release-script-tests--write-file
        (merge-pathnames "autolith/release-images" data-home)
        (format nil "~A:~A~%" tag platform)))
@@ -1779,7 +1818,7 @@ case \" $* \" in
   *'build-recovery.lisp'*)
     mkdir -p \"$(dirname \"$target\")\"
     : > \"$target\"
-    printf '(:RECOVERY-IMAGE :VERSION 2)\\n' > \"$(dirname \"$target\")/manifest.sexp\"
+    printf '(:RECOVERY-IMAGE :VERSION 3)\\n' > \"$(dirname \"$target\")/manifest.sexp\"
     ;;
   *'build-active.lisp'*)
     mkdir -p \"$(dirname \"$target\")\"

@@ -227,6 +227,7 @@
                 (list "env"
                       "-u"
                       "AUTOLITH_SBCL_SOURCE_ROOT"
+                      "AUTOLITH_AGENT_SANDBOX=off"
                       (namestring launcher)
                       "--worker")
                 :input input
@@ -264,6 +265,7 @@
                                    (:name \"CL:MAPCAR\" :kind \"function\"))~%"))
                        (uiop:run-program
                         (list "env"
+                              "AUTOLITH_AGENT_SANDBOX=off"
                               (format nil "XDG_DATA_HOME=~A" data-home)
                               (format nil "XDG_STATE_HOME=~A" state-home)
                               (format nil "AUTOLITH_SBCL_SOURCE_ROOT=~A"

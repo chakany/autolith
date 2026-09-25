@@ -428,6 +428,7 @@ exit 64
            (multiple-value-bind (output error-output status)
                (uiop:run-program
                 (list "env"
+                      "AUTOLITH_AGENT_SANDBOX=off"
                       (format nil "AUTOLITH_SBCL=~A"
                               (namestring fake-sbcl))
                       (format nil "AUTOLITH_TEST_LOG=~A"
