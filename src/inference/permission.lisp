@@ -51,18 +51,26 @@ instructions. Keep the reason to one clause of at most twelve words."
 
 (-> application--command-sandbox-available-p () boolean)
 (defun application--command-sandbox-available-p ()
-  "Return whether the workspace command sandbox can enforce network isolation."
-  (handler-case
-      (and (sandbox-supported-p ':network-isolated) t)
-    (error ()
-      nil)))
+  "Return whether the workspace command sandbox can enforce network isolation.
+
+Inside the agent sandbox it never can: that sandbox already confines every
+command, and a second sandbox cannot be nested inside it."
+  (and (not (agent-sandbox-active-p))
+       (handler-case
+           (and (sandbox-supported-p ':network-isolated) t)
+         (error ()
+           nil))))
 
 (-> application--command-sandbox-unavailable-message () string)
 (defun application--command-sandbox-unavailable-message ()
   "Return an actionable platform-specific command sandbox diagnostic."
-  (if (string-equal (software-type) "Linux")
-      "The workspace command sandbox is unavailable. On Linux, install Bubblewrap (the bwrap executable) to provide filesystem and network isolation. Until it is available, sandbox mode is disabled and command approval choices run with full user privileges."
-      "The workspace command sandbox is unavailable. On Windows, rebuild or reinstall the native cl-exec-sandbox helper. Sandbox mode is disabled and command approval choices run with full user privileges."))
+  (cond
+    ((agent-sandbox-active-p)
+     "Autolith runs inside its agent sandbox, which confines every command, so commands run with full access inside it and need no sandbox of their own.")
+    ((string-equal (software-type) "Linux")
+     "The workspace command sandbox is unavailable. On Linux, install Bubblewrap (the bwrap executable) to provide filesystem and network isolation. Until it is available, sandbox mode is disabled and command approval choices run with full user privileges.")
+    (t
+     "The workspace command sandbox is unavailable. On Windows, rebuild or reinstall the native cl-exec-sandbox helper. Sandbox mode is disabled and command approval choices run with full user privileges.")))
 
 (-> permissions--model-decision-keyword (t) (option keyword))
 (defun permissions--model-decision-keyword (decision)

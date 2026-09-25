@@ -147,3 +147,22 @@ workspace fails with an explanation instead of an unconfined command."
                                (get-output-stream-string errors))
                        "a refused workspace is explained")))))
   nil)
+
+(-> test-agent-sandbox-awareness () null)
+(defun test-agent-sandbox-awareness ()
+  "Test that inside the agent sandbox commands default to full access and no
+command sandbox is offered, while outside it nothing changes."
+  (dolist (case '((nil nil :ask) ("off" nil :ask) ("active" t :full-access)))
+    (with-test-environment (("AUTOLITH_AGENT_SANDBOX" (first case)))
+      (test-assert (eq (agent-sandbox-active-p) (second case))
+                   (format nil "the sandbox marker ~S is ~:[inactive~;active~]"
+                           (first case) (second case)))
+      (test-assert (eq (agent-sandbox-default-permission-mode ':ask) (third case))
+                   (format nil "the default permission mode for ~S is ~S"
+                           (first case) (third case)))))
+  (with-test-environment (("AUTOLITH_AGENT_SANDBOX" "active"))
+    (test-assert (not (application--command-sandbox-available-p))
+                 "no command sandbox is offered inside the agent sandbox")
+    (test-assert (search "agent sandbox" (application--command-sandbox-unavailable-message))
+                 "the missing command sandbox is explained by the agent sandbox"))
+  nil)

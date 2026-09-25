@@ -393,7 +393,8 @@
   test-agent-sandbox-state
   test-agent-sandbox-refuses-home-workspace
   test-agent-sandbox-enforcement
-  test-agent-sandbox-launcher-command)
+  test-agent-sandbox-launcher-command
+  test-agent-sandbox-awareness)
 
 (define-test-suite recovery
   test-recovery-xdg-directories

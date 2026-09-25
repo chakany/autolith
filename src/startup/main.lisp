@@ -702,7 +702,7 @@ dependencies."
          (permission-mode
            (or explicit-permission-mode
                (config :permission-mode configuration)
-               ':ask))
+               (agent-sandbox-default-permission-mode ':ask)))
          (handoff-record
            (localgroup-handoff-selection
             configuration
@@ -744,6 +744,7 @@ dependencies."
       (localgroup-handoff-begin-startup handoff-record)
       (application--clear-recovery-environment))
     (when (and (string-equal (software-type) "Linux")
+               (not (agent-sandbox-active-p))
                (not (application--command-sandbox-available-p)))
       (format *error-output* "~&Autolith: ~A~%"
               (application--command-sandbox-unavailable-message))
@@ -1070,7 +1071,7 @@ AUTOLITH_SESSION_STYLE=direct keep the direct path."
               (permission-mode
                 (or (getopt* command ':permissions)
                     (config :permission-mode configuration)
-                    ':auto))
+                    (agent-sandbox-default-permission-mode ':auto)))
               (status (run-job-run input output permission-mode
                                    :configuration configuration)))
          (unless (zerop status)

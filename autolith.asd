@@ -59,6 +59,7 @@
                              (:file "core/json")
                              (:file "core/time")
                              (:file "core/command-environment")
+                             (:file "core/agent-sandbox")
                              (:file "core/platform")
                              (:file "core/platform-posix" :if-feature (:not :win32))
                              (:file "core/platform-win32" :if-feature :win32)
