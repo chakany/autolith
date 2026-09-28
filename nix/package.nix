@@ -726,7 +726,7 @@ let
           '^\(:ACTIVE-IMAGE :VERSION 1([[:space:]]|$)' \
           "$directory/active/manifest.sexp" &&
         ${pkgs.gnugrep}/bin/grep -Eq \
-          '^\(:RECOVERY-IMAGE :VERSION 2([[:space:]]|$)' \
+          '^\(:RECOVERY-IMAGE :VERSION 3([[:space:]]|$)' \
           "$directory/recovery/manifest.sexp" &&
         "$AUTOLITH_SBCL" --noinform \
           --core "$directory/recovery/autolith-recovery.core" \
