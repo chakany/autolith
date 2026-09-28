@@ -557,6 +557,9 @@ Nix images and ASDF cache, and sandbox helpers. Conversations, memories,
 generations, and worker images remain in =autolith/=. Existing launcher
 directories move on the first launch. The installer updates an existing
 =~/.local/bin/autolith= link that points to the old release installation.
+If Nix data exists in both roots, the old tree is retained under
+=autolith-launcher/nix/legacy-migration.<id>/nix/= and the new tree remains
+active. A repeated launch leaves that archive in place.
 The compatibility migration is scheduled for removal in v0.53.0.
 
 On Windows the same four roots are, unless an absolute XDG variable overrides
