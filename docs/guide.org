@@ -243,6 +243,11 @@ Inside the sandbox:
   =autolith-launcher= state root on first launch. The global =mcp.sexp= moves
   from the agent config root to the hidden launcher config root. Both
   migrations are safe to rerun and are scheduled for removal in v0.53.0.
+  If a provider credential exists in both state roots, the launcher copy
+  remains active. The old copy moves into a private
+  =autolith-launcher/legacy-credentials.<id>/= archive and is not loaded by
+  the broker. Use =autolith auth= to renew a credential if the active copy is
+  stale.
   Interactive sessions run through a launcher-owned terminal relay, which keeps
   the real terminal away from the agent. A trusted approval screen requires a
   fresh code typed in that terminal before a brokered action can proceed.
