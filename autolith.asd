@@ -53,6 +53,7 @@
                 :serial t
                 :components ((:file "core/package")
                              (:file "core/types")
+                             (:file "core/base-conditions")
                              (:file "core/conditions")
                              (:file "core/deprecation")
                              (:file "localgroup/protocol")

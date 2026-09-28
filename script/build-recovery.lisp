@@ -44,6 +44,7 @@
              (uiop:symbol-call '#:ql '#:quickload :serapeum :silent t)
              (uiop:symbol-call '#:ql '#:quickload :sbcl-generations :silent t)
              (uiop:symbol-call '#:ql '#:quickload :cl-exec-sandbox :silent t)
+             (uiop:symbol-call '#:ql '#:quickload :quri :silent t)
              (let ((package (or (find-package "AUTOLITH")
                                 (make-package "AUTOLITH" :use '("CL")))))
                (export (mapcar (lambda (name) (intern name package))
@@ -74,6 +75,12 @@
                              "recovery/runtime.lisp"
                              "recovery/sandbox.lisp"
                              "recovery/launcher.lisp"
+                             "script/roots.lisp"
+                             "src/core/types.lisp"
+                             "src/core/base-conditions.lisp"
+                             "src/core/platform.lisp"
+                             "src/core/platform-posix.lisp"
+                             "src/core/platform-win32.lisp"
                              "bin/autolith"
                              "bin/autolith-active"
                              "bin/autolith-runtime"
@@ -88,6 +95,15 @@
                      :source-clean-p (zerop (length status))
                      :runtime-blob (source-blob "recovery/runtime.lisp")
                      :sandbox-blob (source-blob "recovery/sandbox.lisp")
+                     :roots-blob (source-blob "script/roots.lisp")
+                     :types-blob (source-blob "src/core/types.lisp")
+                     :base-conditions-blob
+                     (source-blob "src/core/base-conditions.lisp")
+                     :platform-blob (source-blob "src/core/platform.lisp")
+                     :posix-platform-blob
+                     (source-blob "src/core/platform-posix.lisp")
+                     :win32-platform-blob
+                     (source-blob "src/core/platform-win32.lisp")
                      :builder-blob (source-blob "script/build-recovery")
                      :builder-source-blob
                      (source-blob "script/build-recovery.lisp")

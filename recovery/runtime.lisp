@@ -1,6 +1,16 @@
 (in-package #:autolith)
 
 (load (merge-pathnames "../script/roots.lisp" *load-truename*))
+(unless (boundp '*platform*)
+  (require :sb-bsd-sockets)
+  (import 'serapeum:->)
+  (load (merge-pathnames "../src/core/types.lisp" *load-truename*))
+  (load (merge-pathnames "../src/core/base-conditions.lisp" *load-truename*))
+  (load (merge-pathnames "../src/core/platform.lisp" *load-truename*))
+  (load (merge-pathnames (if (uiop:os-windows-p)
+                             "../src/core/platform-win32.lisp"
+                             "../src/core/platform-posix.lisp")
+                         *load-truename*)))
 (load (merge-pathnames "sandbox.lisp" *load-truename*))
 
 ;;;; -- Recovery State --
