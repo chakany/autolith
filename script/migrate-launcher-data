@@ -83,6 +83,7 @@ autolith_migrate_launcher_credentials()
   fi
   [ -d "$migration_new" ] || return 1
   chmod 700 "$migration_new" || return 1
+  migration_archive=
 
   for migration_name in auth.sexp grok-auth.sexp nous-auth.sexp \
       gemini-auth.sexp api-keys.sexp fireworks-auth.sexp opencode-auth.sexp; do
@@ -93,9 +94,20 @@ autolith_migrate_launcher_credentials()
       return 1
     fi
     [ -e "$migration_source" ] || continue
-    if [ ! -f "$migration_source" ] || [ -e "$migration_target" ]; then
+    if [ ! -f "$migration_source" ]; then
       printf 'Autolith credential migration: %s cannot be moved safely.\n' "$migration_name" >&2
       return 1
+    fi
+    if [ -e "$migration_target" ]; then
+      if [ ! -f "$migration_target" ]; then
+        printf 'Autolith credential migration: %s cannot be moved safely.\n' "$migration_name" >&2
+        return 1
+      fi
+      if [ -z "$migration_archive" ]; then
+        migration_archive=$(mktemp -d "$migration_new/legacy-credentials.XXXXXXXX") || return 1
+      fi
+      mv -- "$migration_source" "$migration_archive/$migration_name" || return 1
+      continue
     fi
     mv -- "$migration_source" "$migration_target" || return 1
   done

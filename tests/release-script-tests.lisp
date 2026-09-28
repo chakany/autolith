@@ -707,7 +707,7 @@ printf 'subprocess %s\\n' \"$*\" >> \"${AUTOLITH_TEST_EVENT_LOG:?}\"
 
 (-> test-launcher-credential-migration () null)
 (defun test-launcher-credential-migration ()
-  "Test fresh, repeated, partial, and linked legacy credential moves."
+  "Test fresh, repeated, partial, conflicting, and linked credential moves."
   (with-test-configuration (configuration root)
     (declare (ignore configuration))
     (let ((migration (asdf:system-relative-pathname
@@ -719,7 +719,7 @@ printf 'subprocess %s\\n' \"$*\" >> \"${AUTOLITH_TEST_EVENT_LOG:?}\"
                         "credential-migration-test"
                         (namestring migration) (namestring state-home))
                   :ignore-error-status t)))
-        (dolist (case '("fresh" "migrated" "partial" "linked"))
+        (dolist (case '("fresh" "migrated" "partial" "conflict" "linked"))
           (let* ((state-home (merge-pathnames
                               (format nil "credentials-~A/" case) root))
                  (old (merge-pathnames "autolith/" state-home))
@@ -738,6 +738,15 @@ printf 'subprocess %s\\n' \"$*\" >> \"${AUTOLITH_TEST_EVENT_LOG:?}\"
                 (merge-pathnames "auth.sexp" new) "migrated")
                (release-script-tests--write-file
                 (merge-pathnames "grok-auth.sexp" old) "pending"))
+              ((string= case "conflict")
+               (release-script-tests--write-file
+                (merge-pathnames "auth.sexp" new) "trusted")
+               (release-script-tests--write-file
+                (merge-pathnames "auth.sexp" old) "legacy")
+               (release-script-tests--write-file
+                (merge-pathnames "opencode-auth.sexp" new) "trusted CLI")
+               (release-script-tests--write-file
+                (merge-pathnames "opencode-auth.sexp" old) "legacy CLI"))
               ((string= case "linked")
                (release-script-tests--write-file outside "outside")
                (ensure-directories-exist (merge-pathnames "marker" old))
@@ -756,12 +765,49 @@ printf 'subprocess %s\\n' \"$*\" >> \"${AUTOLITH_TEST_EVENT_LOG:?}\"
                            "partial migration moves the remaining file")
               (test-assert (probe-file (merge-pathnames "auth.sexp" new))
                            "migrated credential remains in launcher state")
+              (when (string= case "conflict")
+                (let* ((archives
+                         (remove-if-not
+                          (lambda (name)
+                            (uiop:string-prefix-p "legacy-credentials." name))
+                          (platform-list-directory *platform* new)))
+                       (archive
+                         (and (= (length archives) 1)
+                              (merge-pathnames
+                               (format nil "~A/" (first archives)) new))))
+                  (test-assert
+                   (and archive
+                        (platform-file-status-private-p
+                         (platform-path-status *platform* archive))
+                        (equal (uiop:read-file-string
+                                (merge-pathnames "auth.sexp" new))
+                               "trusted")
+                        (equal (uiop:read-file-string
+                                (merge-pathnames "opencode-auth.sexp" new))
+                               "trusted CLI")
+                        (equal (uiop:read-file-string
+                                (merge-pathnames "auth.sexp" archive))
+                               "legacy")
+                        (equal (uiop:read-file-string
+                                (merge-pathnames "opencode-auth.sexp" archive))
+                               "legacy CLI")
+                        (not (probe-file (merge-pathnames "auth.sexp" old)))
+                        (not (probe-file
+                              (merge-pathnames "opencode-auth.sexp" old))))
+                   "conflicting credentials stay archived under private launcher state")))
               (multiple-value-bind (output error-output status)
                   (run state-home)
                 (declare (ignore output))
                 (test-assert (zerop status)
                              (format nil "~A migration reruns: ~A"
-                                     case error-output))))
+                                     case error-output)))
+              (when (string= case "conflict")
+                (test-assert
+                 (= 1 (count-if
+                       (lambda (name)
+                         (uiop:string-prefix-p "legacy-credentials." name))
+                       (platform-list-directory *platform* new)))
+                 "rerunning a credential conflict preserves one archive")))
             (when (string= case "linked")
               (test-assert (equal (uiop:read-file-string outside) "outside")
                            "linked credential target stays unchanged")))))))
