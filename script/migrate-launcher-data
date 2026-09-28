@@ -28,6 +28,15 @@ autolith_migrate_launcher_data()
       fi
       [ -e "$migration_source" ] || continue
       if [ -e "$migration_target" ]; then
+        if [ "$migration_name" = nix ] &&
+           [ -d "$migration_source" ] && [ -d "$migration_target" ]; then
+          migration_archive=$(mktemp -d "$migration_target/legacy-migration.XXXXXXXX") || return 1
+          if ! mv -- "$migration_source" "$migration_archive/nix"; then
+            rmdir -- "$migration_archive"
+            return 1
+          fi
+          continue
+        fi
         printf 'Autolith migration: %s exists in both data roots.\n' "$migration_name" >&2
         return 1
       fi

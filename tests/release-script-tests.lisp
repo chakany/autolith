@@ -581,7 +581,7 @@ printf 'subprocess %s\\n' \"$*\" >> \"${AUTOLITH_TEST_EVENT_LOG:?}\"
 
 (-> release-script-tests--launcher-data-migration (pathname pathname) null)
 (defun release-script-tests--launcher-data-migration (source-root root)
-  "Exercise first run, rerun, partial moves, and inert interior links."
+  "Exercise first run, rerun, partial moves, Nix collisions, and inert links."
   (let ((migration (merge-pathnames "script/migrate-launcher-data" source-root)))
     (labels ((run (data-home home)
                (release-script-tests--run
@@ -589,7 +589,8 @@ printf 'subprocess %s\\n' \"$*\" >> \"${AUTOLITH_TEST_EVENT_LOG:?}\"
                       "migration-test" (namestring migration) (namestring data-home))
                 :environment (list (format nil "HOME=~A" (namestring home)))
                 :ignore-error-status t)))
-      (dolist (case '("fresh" "migrated" "partial" "interior-link"))
+      (dolist (case '("fresh" "migrated" "partial" "interior-link"
+                      "nix-conflict"))
         (let* ((data-home (merge-pathnames (format nil "migration-~A/data/" case) root))
                (home (merge-pathnames (format nil "migration-~A/home/" case) root))
                (old (merge-pathnames "autolith/" data-home))
@@ -616,7 +617,18 @@ printf 'subprocess %s\\n' \"$*\" >> \"${AUTOLITH_TEST_EVENT_LOG:?}\"
              (release-script-tests--write-file outside "outside")
              (ensure-directories-exist (merge-pathnames "active/core" old))
              (sb-posix:symlink (namestring outside)
-                               (namestring (merge-pathnames "active/outside" old)))))
+                               (namestring (merge-pathnames "active/outside" old))))
+            ((string= case "nix-conflict")
+             (release-script-tests--write-file outside "outside")
+             (release-script-tests--write-file
+              (merge-pathnames "nix/images/shared/core" new) "new")
+             (release-script-tests--write-file
+              (merge-pathnames "nix/images/shared/core" old) "old")
+             (release-script-tests--write-file
+              (merge-pathnames "nix/images/unique/core" old) "unique")
+             (sb-posix:symlink
+              (namestring outside)
+              (namestring (merge-pathnames "nix/images/unique/external" old)))))
           (multiple-value-bind (output error-output status) (run data-home home)
             (declare (ignore output))
             (test-assert (zerop status)
@@ -640,10 +652,48 @@ printf 'subprocess %s\\n' \"$*\" >> \"${AUTOLITH_TEST_EVENT_LOG:?}\"
                                   ':symbolic-link)
                               (equal (uiop:read-file-string outside) "outside"))
                          "migration moves an interior link without following it"))
+          (when (string= case "nix-conflict")
+            (let* ((nix-root (merge-pathnames "nix/" new))
+                   (archives
+                     (remove-if-not
+                      (lambda (name)
+                        (uiop:string-prefix-p "legacy-migration." name))
+                      (platform-list-directory *platform* nix-root)))
+                   (archive
+                     (and (= (length archives) 1)
+                          (merge-pathnames
+                           (format nil "~A/nix/" (first archives)) nix-root))))
+              (test-assert
+               (and archive
+                    (not (probe-file (merge-pathnames "nix/" old)))
+                    (equal (uiop:read-file-string
+                            (merge-pathnames "images/shared/core" nix-root))
+                           "new")
+                    (equal (uiop:read-file-string
+                            (merge-pathnames "images/shared/core" archive))
+                           "old")
+                    (equal (uiop:read-file-string
+                            (merge-pathnames "images/unique/core" archive))
+                           "unique")
+                    (eq (platform-file-status-kind
+                         (platform-path-status
+                          *platform*
+                          (merge-pathnames "images/unique/external" archive)))
+                        ':symbolic-link)
+                    (equal (uiop:read-file-string outside) "outside"))
+               "Nix collisions preserve both trees without following links")))
           (multiple-value-bind (output error-output status) (run data-home home)
             (declare (ignore output))
             (test-assert (zerop status)
-                         (format nil "~A migration reruns safely: ~A" case error-output)))))))
+                         (format nil "~A migration reruns safely: ~A" case error-output)))
+          (when (string= case "nix-conflict")
+            (test-assert
+             (= 1 (count-if
+                   (lambda (name)
+                     (uiop:string-prefix-p "legacy-migration." name))
+                   (platform-list-directory
+                    *platform* (merge-pathnames "nix/" new))))
+             "rerunning a Nix collision does not create another archive"))))))
   nil)
 
 (-> test-launcher-data-migration () null)
