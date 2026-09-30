@@ -61,7 +61,7 @@
     ((provider subscription-provider) (conversation conversation)
      &key tool-namespaces event-callback force-refresh goal-context compaction-p)
   "Route sandboxed provider attempts through the broker without loading a token."
-  (if (eq (agent-sandbox-state) ':active)
+  (if (agent-sandbox-active-p)
       (broker-provider--agent-attempt
        provider conversation
        :tool-namespaces tool-namespaces
@@ -75,7 +75,7 @@
     ((provider codex-subscription-provider) (conversation conversation)
      &key tool-namespaces force-refresh)
   "Route native compaction through the broker in a sandboxed agent."
-  (if (eq (agent-sandbox-state) ':active)
+  (if (agent-sandbox-active-p)
       (let ((request (provider-native-compaction-request-object
                       provider conversation tool-namespaces)))
         (broker-client-request

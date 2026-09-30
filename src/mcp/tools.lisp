@@ -2479,7 +2479,7 @@ retained value is credential-redacted or projected."
     (values tool-registry (option mcp-manager)))
 (defun mcp-tool-registry-augment (registry configuration)
   "Discover configured MCP servers and add their tools to REGISTRY."
-  (if (eq (agent-sandbox-state) ':active)
+  (if (agent-sandbox-active-p)
       (values (broker-registered-agent-register
                (broker-mcp-agent-register registry))
               nil)

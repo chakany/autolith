@@ -653,7 +653,7 @@ model's effort choice to CONFIGURATION--CLONE."
 (defun application--load-extension-configuration
     (configuration &key pristine-p)
   "Load native MCP and executable user configuration for CONFIGURATION."
-  (unless (eq (agent-sandbox-state) ':active)
+  (unless (agent-sandbox-active-p)
     (mcp-configuration-load configuration))
   (unless pristine-p
     (user-init-load configuration))

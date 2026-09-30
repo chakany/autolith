@@ -558,7 +558,7 @@ same name."
     (let* ((discovery (provider-registration-model-discovery registration))
            (discovered-models
              (provider--normalize-models
-              (if (eq (agent-sandbox-state) ':active)
+              (if (agent-sandbox-active-p)
                   (broker-provider--agent-discover registration)
                   (funcall discovery configuration))
               :allow-empty-p t))

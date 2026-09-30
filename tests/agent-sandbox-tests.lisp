@@ -549,4 +549,20 @@ command sandbox is offered, while outside it nothing changes."
                  "no command sandbox is offered inside the agent sandbox")
     (test-assert (search "agent sandbox" (application--command-sandbox-unavailable-message))
                  "the missing command sandbox is explained by the agent sandbox"))
+  (with-test-configuration (configuration)
+    (dolist (marker '(nil "off" "active"))
+      (with-test-environment (("AUTOLITH_AGENT_SANDBOX" marker))
+        (let ((loads 0))
+          (test-call-with-function-replacements
+           (list (list 'agent-sandbox-state
+                       (lambda ()
+                         (error "The active agent must not call recovery code.")))
+                 (list 'mcp-configuration-load
+                       (lambda (configuration)
+                         (declare (ignore configuration))
+                         (incf loads))))
+           (lambda ()
+             (application--load-extension-configuration configuration :pristine-p t)))
+          (test-assert (= loads (if (equal marker "active") 0 1))
+                       "startup loads MCP configuration only outside the agent sandbox")))))
   nil)
