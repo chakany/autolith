@@ -209,12 +209,14 @@
   (dolist (thread (broker-server-threads server))
     (unless (eq thread (current-thread))
       (ignore-errors (join-thread thread))))
-  (let ((current (platform-path-status
-                  *platform* (broker-server-pathname server))))
-    (when (and current
-               (broker-server-identity server)
-               (eq (platform-file-status-kind current) ':socket)
-               (platform-file-status-same-object-p
-                current (broker-server-identity server)))
-      (delete-file (broker-server-pathname server))))
+  (with-lock-held ((broker-server-lock server))
+    (let ((current (platform-path-status
+                    *platform* (broker-server-pathname server))))
+      (when (and current
+                 (broker-server-identity server)
+                 (eq (platform-file-status-kind current) ':socket)
+                 (platform-file-status-same-object-p
+                  current (broker-server-identity server)))
+        (delete-file (broker-server-pathname server))
+        (setf (broker-server-identity server) nil))))
   nil)
