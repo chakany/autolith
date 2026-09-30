@@ -646,9 +646,11 @@ let
     export COLORLISP_NATIVE_LIBRARY="${colorlispNativeLibrary}/lib/libcolorlisp-tree-sitter${sharedLibrary}"
     export AUTOLITH_FFF_LIBRARY="${fffLibrary}/lib/libfff_c${sharedLibrary}"
     ${sandboxEnvironment}
-    export GIT_CONFIG_COUNT=1
+    export GIT_CONFIG_COUNT=2
     export GIT_CONFIG_KEY_0=safe.directory
     export GIT_CONFIG_VALUE_0="${autolithSystem}"
+    export GIT_CONFIG_KEY_1=safe.directory
+    export GIT_CONFIG_VALUE_1="${autolithSystem}/.git"
     export GIT_OPTIONAL_LOCKS=0
 
     image_root="$TMPDIR/images"
@@ -662,6 +664,12 @@ let
     test -f "$image_root/recovery/manifest.sexp"
     test -f "$image_root/active/autolith-active.core"
     test -f "$image_root/active/manifest.sexp"
+
+    # Recovery clones the root-owned source repository into a private worktree.
+    # Git checks the repository directory itself during a local clone.
+    git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+      clone --quiet --no-checkout --no-hardlinks \
+      "${autolithSystem}/" "$TMPDIR/recovery-source"
 
     mkdir -p "$out"
     printf '%s\n' validated > "$out/image-validation"
@@ -824,10 +832,12 @@ pkgs.writeShellApplication {
     ${sandboxEnvironment}
 
     # The packaged source repository is root-owned in /nix/store. Permit Git
-    # provenance reads without weakening safe.directory globally.
-    export GIT_CONFIG_COUNT=1
+    # provenance reads and recovery clones without changing global Git policy.
+    export GIT_CONFIG_COUNT=2
     export GIT_CONFIG_KEY_0=safe.directory
     export GIT_CONFIG_VALUE_0="${autolithSystem}"
+    export GIT_CONFIG_KEY_1=safe.directory
+    export GIT_CONFIG_VALUE_1="${autolithSystem}/.git"
     export GIT_OPTIONAL_LOCKS=0
 
     # Keep Nix-managed image and ASDF state separate from source installs while
