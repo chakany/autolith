@@ -62,6 +62,8 @@ returning, because each connection owns exactly one request."
                (funcall response-function stream))
            (broker-protocol-error (condition)
              (error condition))
+           (broker-unavailable (condition)
+             (error condition))
            (error ()
              (error 'broker-unavailable
                     :message "The credential broker request failed."

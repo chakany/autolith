@@ -392,6 +392,7 @@
   test-broker-server-capability)
 
 (define-test-suite broker-provider
+  test-broker-provider-failures
   test-broker-terminal-approval
   test-broker-provider-transport
   test-broker-trusted-configuration

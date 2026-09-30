@@ -2,6 +2,31 @@
 
 ;;;; -- Broker Response Stream --
 
+(-> broker-response--read-frame (stream) t)
+(defun broker-response--read-frame (stream)
+  "Read a bounded frame, preserving sanitized broker failure categories."
+  (let ((frame (management-repl-read-frame stream *broker-maximum-frame-size*)))
+    (when (or (equal frame '(:broker-result :status :failed))
+              (and (listp frame)
+                   (eql (ignore-errors (list-length frame)) 5)
+                   (equal (subseq frame 0 4)
+                          '(:broker-result :status :failed :reason))
+                   (member (fifth frame) '(:target :payload :authentication :handler))))
+      (let ((reason (if (= (length frame) 5) (fifth frame) ':handler)))
+        (error 'broker-unavailable
+               :reason reason
+               :message
+               (case reason
+                 (:target
+                  "The requested provider or model is unavailable in the broker's trusted configuration. Private agent mutations do not update the broker.")
+                 (:payload
+                  "The broker rejected the provider request payload.")
+                 (:authentication
+                  "The broker could not authenticate with the provider. Run autolith auth in a terminal.")
+                 (otherwise
+                  "The broker could not complete the provider request.")))))
+    frame))
+
 (defclass broker-response-stream (sb-gray:fundamental-character-input-stream)
   ((source
     :initarg :source
@@ -28,7 +53,7 @@
 (-> broker-response-open (stream) (values broker-response-stream integer))
 (defun broker-response-open (stream)
   "Validate the broker's opening response and return a streaming body."
-  (let ((frame (management-repl-read-frame stream *broker-maximum-frame-size*)))
+  (let ((frame (broker-response--read-frame stream)))
     (unless (and (listp frame)
                  (eql (ignore-errors (list-length frame)) 5)
                  (eq (first frame) ':broker-result)
@@ -47,9 +72,8 @@
 (defun broker-response-stream--next-chunk (response)
   "Advance RESPONSE to its next validated text chunk or terminal frame."
   (loop
-    for frame = (management-repl-read-frame
-                 (broker-response-stream-source response)
-                 *broker-maximum-frame-size*)
+    for frame = (broker-response--read-frame
+                 (broker-response-stream-source response))
     do (cond
          ((equal frame '(:broker-end))
           (setf (broker-response-stream-ended-p response) t)

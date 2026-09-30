@@ -125,18 +125,32 @@
         (ignore-errors (sb-bsd-sockets:socket-close listener))
         (error condition)))))
 
-(-> broker-server--write-failure (stream) null)
-(defun broker-server--write-failure (stream)
-  "Report failure without exposing a trusted handler condition or credential."
+(-> broker-server--write-failure (stream &optional (option condition)) null)
+(defun broker-server--write-failure (stream &optional condition)
+  "Report an authorized handler's failure category without exposing its data."
   (ignore-errors
-    (broker-write-frame stream '(:broker-result :status :failed)))
+    (broker-write-frame
+     stream
+     (if condition
+         (list ':broker-result ':status ':failed ':reason
+               (cond
+                 ((and (typep condition 'broker-protocol-error)
+                       (member (broker-protocol-error-reason condition)
+                               '(:target :payload)))
+                  (broker-protocol-error-reason condition))
+                 ((typep condition 'authentication-error)
+                  ':authentication)
+                 (t
+                  ':handler)))
+         '(:broker-result :status :failed))))
   nil)
 
 (-> broker-server--serve-client (broker-server sb-bsd-sockets:socket) null)
 (defun broker-server--serve-client (server socket)
   "Read one request and let SERVER's trusted handler emit bounded frames."
   (unwind-protect
-       (let ((stream (sb-bsd-sockets:socket-make-stream
+       (let ((authorized-p nil)
+             (stream (sb-bsd-sockets:socket-make-stream
                       socket :input t :output t
                       :element-type '(unsigned-byte 8)
                       :buffering ':none :timeout 10)))
@@ -148,13 +162,15 @@
                         (error 'broker-protocol-error
                                :message "The broker request is not authorized."
                                :reason ':capability))
+                      (setf authorized-p t)
                       (funcall
                        (broker-server-handler server)
                        request
                        (lambda (frame)
                          (broker-write-frame stream frame)))))
-                (error ()
-                  (broker-server--write-failure stream)))
+                (error (condition)
+                  (broker-server--write-failure
+                   stream (when authorized-p condition))))
            (ignore-errors (close stream))))
     (with-lock-held ((broker-server-lock server))
       (setf (broker-server-clients server)

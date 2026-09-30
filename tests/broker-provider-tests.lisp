@@ -2,6 +2,83 @@
 
 ;;;; -- Trusted Provider Transport Tests --
 
+(-> test-broker-provider-failures () null)
+(defun test-broker-provider-failures ()
+  "Test broker failures retain safe categories across the real client boundary."
+  (with-platform-capability (':local-sockets "broker provider failures")
+    (let* ((root (platform-make-temporary-directory
+                  *platform* (uiop:temporary-directory) "broker-failures-"))
+           (pathname (merge-pathnames "broker.sock" root))
+           (server
+             (broker-server-create
+              pathname
+              (lambda (request write-frame)
+                (let ((target (getf (rest request) ':target)))
+                  (when (string= target "stream")
+                    (funcall write-frame '(:broker-result :status :open :code 200)))
+                  (cond
+                    ((string= target "target")
+                     (error 'broker-protocol-error
+                            :reason ':target :message "private-token"))
+                    ((string= target "payload")
+                     (error 'broker-protocol-error
+                            :reason ':payload :message "private-token"))
+                    ((string= target "authentication")
+                     (error 'authentication-error :message "private-token"))
+                    (t
+                     (error "private-token")))))))
+           (thread nil))
+      (unwind-protect
+           (progn
+             (broker-server-start server)
+             (setf thread (make-thread (lambda () (broker-server-serve server))
+                                       :name "Broker failure test"))
+             (dolist (case '(("target" :target "trusted configuration")
+                             ("payload" :payload "payload")
+                             ("authentication" :authentication "autolith auth")
+                             ("handler" :handler "complete")
+                             ("stream" :handler "complete")))
+               (let ((failure
+                       (handler-case
+                           (broker-client-request
+                            ':provider-turn (first case) "{}"
+                            (lambda (stream)
+                              (multiple-value-bind (body status)
+                                  (broker-response-open stream)
+                                (declare (ignore status))
+                                (read-char body)))
+                            :socket-pathname pathname)
+                         (broker-unavailable (condition) condition))))
+                 (test-assert
+                  (and (typep failure 'broker-unavailable)
+                       (eq (broker-unavailable-reason failure) (second case)))
+                  "client preserves opening and streaming failure categories")
+                 (test-assert
+                  (search (third case) (autolith-error-message failure))
+                  "client supplies an actionable category-specific message")
+                 (test-assert
+                  (not (search "private-token" (autolith-error-message failure)))
+                  "trusted condition data never reaches the agent"))))
+        (broker-server-close server)
+        (when thread (join-thread thread))
+        (platform-delete-directory-tree *platform* root
+                                        :validate t :if-does-not-exist ':ignore))))
+  (dolist (frame '((:broker-result :status :failed)
+                    (:broker-result :status :failed :reason :unknown)))
+    (let ((output (make-in-memory-output-stream)))
+      (broker-write-frame output frame)
+      (test-assert
+       (handler-case
+           (progn
+             (broker-response-open
+              (flexi-streams:make-in-memory-input-stream
+               (get-output-stream-sequence output)))
+             nil)
+         (broker-unavailable () (= (length frame) 3))
+         (broker-protocol-error () (= (length frame) 5)))
+       "legacy failures remain readable and unknown categories are rejected")))
+  nil)
+
 (-> test-broker-terminal-approval () null)
 (defun test-broker-terminal-approval ()
   "Test a broker prompt reaches only the private trusted terminal endpoint."
