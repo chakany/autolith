@@ -233,6 +233,12 @@ run_trusted_source()
 {
   local trusted_cache=$cache_home/autolith-launcher/trusted-source
 
+  # Nix source timestamps are fixed, so a shared output path can retain FASLs
+  # from an older package. Keep each immutable source closure's cache separate.
+  case $source_root in
+    /nix/store/*) trusted_cache=$trusted_cache/${source_root##*/} ;;
+  esac
+
   mkdir -p -- "$trusted_cache/asdf" || return 64
   chmod 700 "$cache_home/autolith-launcher" "$trusted_cache" || return 64
   env -u AUTOLITH_PROJECT_SETUP -u ASDF_OUTPUT_TRANSLATIONS \
