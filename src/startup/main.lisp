@@ -2,6 +2,9 @@
 
 ;;;; -- Application Lifecycle --
 
+(defvar *main-launcher-client-p* nil
+  "Whether startup is the trusted terminal client, which must never run an agent.")
+
 (defparameter *application-banner-logo-lines*
   '((:brand-gradient-1 . "  :::.      :::")
     (:brand-gradient-2 . "  ;;`;;     ;;;")
@@ -685,7 +688,8 @@ dependencies."
     (command &key resume-requested-p resume-id authenticate-p
                   authentication-selection authentication-method)
   "Start one interactive Autolith session from COMMAND's parsed options."
-  (main--register-local-source-trees)
+  (unless *main-launcher-client-p*
+    (main--register-local-source-trees))
   (let* ((pristine-p (not (null (getopt* command ':pristine))))
          (immutable-p (or pristine-p
                           (not (null (getopt* command ':immutable)))))
@@ -780,6 +784,10 @@ dependencies."
                 (ignore-errors (localgroup-query-record record ':kill))
                 (error condition))))
           (return-from main--start-session nil))))
+    (when *main-launcher-client-p*
+      (error 'localgroup-error
+             :message "The terminal client cannot run an agent directly."
+             :operation ':spawn))
     (let ((*localgroup-startup-record* handoff-record))
       (setf *active-application*
             (main--connect-application
@@ -849,11 +857,12 @@ dependencies."
 A client-first start keeps this terminal a thin relay whose detach is
 immediate and never interrupts session work, so resumes and crash recovery
 take it too. Replacements, authentication, startup images, crash simulation,
-non-interactive terminals, hosts without detached sessions, and
+non-interactive terminals, sandboxed agents, hosts without detached sessions, and
 AUTOLITH_SESSION_STYLE=direct keep the direct path."
   (declare (ignore resume-requested-p resume-id
                    recovery-conversation-id recovery-diagnosis))
   (and (null handoff-record)
+       (not (agent-sandbox-active-p))
        (not pristine-p)
        (not authenticate-p)
        (null image-values)
@@ -881,9 +890,11 @@ AUTOLITH_SESSION_STYLE=direct keep the direct path."
                                       :resume-command-p resume-command-p
                                       :recovery-diagnosis recovery-diagnosis)
     (error (condition)
+      (when *main-launcher-client-p*
+        (error condition))
       (format *error-output*
               "Autolith is starting directly in this terminal: ~A~%"
-              (bounded-string condition :limit 400))
+              (bounded-string (princ-to-string condition) :limit 400))
       nil)))
 
 (-> main--session-options () list)
@@ -1161,6 +1172,63 @@ both update the packaged installation and exit without starting a session."
               :message (format nil "Unknown command ~S."
                                (first (command-arguments command)))))
      (main--start-session command))))
+
+(-> main--launcher-client-command-p (clingon:command) boolean)
+(defun main--launcher-client-command-p (command)
+  "Return whether COMMAND can run as a trusted client without loading user code."
+  (and (member (command-name command) '("autolith" "resume") :test #'string=)
+       (or (string= (command-name command) "resume")
+           (null (command-arguments command)))
+       (null (getopt* command ':localgroup-handoff))
+       (main--client-session-p
+        :image-values (getopt* command ':images)
+        :pristine-p (not (null (getopt* command ':pristine)))
+        :simulate-crash-p (not (null (getopt* command ':simulate-crash))))))
+
+(-> main--restore-client-launch-environment () null)
+(defun main--restore-client-launch-environment ()
+  "Restore application cache roots before a trusted client launches a session.
+
+The client has already loaded protected source with its own compiler cache.
+Its child must inherit the original application cache instead. Nix runtime
+wrappers supply fresh ASDF registries, so do not nest the client's registries."
+  (let ((cache-home (uiop:getenv "AUTOLITH_CLIENT_CACHE_HOME"))
+        (asdf-cache (uiop:getenv "AUTOLITH_CLIENT_ASDF_CACHE")))
+    (when cache-home
+      (platform-setenv "XDG_CACHE_HOME" cache-home)
+      (if (non-empty-string-p asdf-cache)
+          (platform-setenv "AUTOLITH_ASDF_CACHE" asdf-cache)
+          (platform-unsetenv "AUTOLITH_ASDF_CACHE"))
+      (platform-unsetenv "AUTOLITH_CLIENT_CACHE_HOME")
+      (platform-unsetenv "AUTOLITH_CLIENT_ASDF_CACHE")
+      (when (equal (uiop:getenv "AUTOLITH_INSTALLATION_KIND") "nix")
+        (platform-unsetenv "CL_SOURCE_REGISTRY")
+        (platform-unsetenv "ASDF_OUTPUT_TRANSLATIONS"))))
+  nil)
+
+(-> main-launcher-client (list) null)
+(defun main-launcher-client (arguments)
+  "Run an eligible session as the stable launcher's trusted terminal client.
+
+Exit with 125 when the command needs the ordinary agent entry. Only session
+handlers run here; private mutations, user init, and agent evaluation remain
+inside the detached session's sandbox. A failed spawn fails this entry instead
+of falling back to an unconfined agent."
+  (handler-case
+      (progn
+        (main--restore-client-launch-environment)
+        (let ((command (parse-command-line (main--top-level-command) arguments)))
+          (unless (main--launcher-client-command-p command)
+            (uiop:quit 125))
+          (let ((*main-launcher-client-p* t))
+            (funcall (command-handler command) command))))
+    (exit-error (condition)
+      (uiop:quit (exit-error-code condition)))
+    (error (condition)
+      (format *error-output* "Autolith could not start its terminal client: ~A~%"
+              condition)
+      (uiop:quit 64)))
+  nil)
 
 (-> main-dispatch (list) null)
 (defun main-dispatch (arguments)

@@ -618,6 +618,7 @@
   test-localgroup-client-first-resume
   test-localgroup-abandoned-session-exit
   test-localgroup-fresh-session-spawn
+  test-localgroup-launcher-client
   test-localgroup-process-handoff)
 
 (define-test-suite localgroup-handoff-boundary
@@ -628,6 +629,7 @@
 ;;; POSIX hosts, so their suites exist only where the POSIX shell does.
 (when (test-fixture-available-p *platform* ':posix-shell)
   (define-test-suite release-script
+    test-launcher-client-boundary
     test-build-sandbox-packaged-helpers
     test-installer-checksum-verification
     test-launcher-data-migration

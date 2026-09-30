@@ -449,6 +449,69 @@
    "the spawned session itself runs direct")
   nil)
 
+(-> test-localgroup-launcher-client () null)
+(defun test-localgroup-launcher-client ()
+  "Test trusted client dispatch, sandbox exclusion, and failed-spawn containment."
+  (with-test-environment (("AUTOLITH_CLIENT_CACHE_HOME" "/tmp/application-cache/")
+                         ("AUTOLITH_CLIENT_ASDF_CACHE" "/tmp/application-asdf/")
+                         ("XDG_CACHE_HOME" "/tmp/trusted-cache/")
+                         ("AUTOLITH_ASDF_CACHE" "/tmp/trusted-asdf/")
+                         ("AUTOLITH_INSTALLATION_KIND" "nix")
+                         ("CL_SOURCE_REGISTRY" "fixture-registry")
+                         ("ASDF_OUTPUT_TRANSLATIONS" "fixture-translations"))
+    (main--restore-client-launch-environment)
+    (test-assert (and (equal (uiop:getenv "XDG_CACHE_HOME") "/tmp/application-cache/")
+                      (equal (uiop:getenv "AUTOLITH_ASDF_CACHE") "/tmp/application-asdf/"))
+                 "detached children inherit application caches instead of trusted caches")
+    (test-assert (and (null (uiop:getenv "AUTOLITH_CLIENT_CACHE_HOME"))
+                      (null (uiop:getenv "AUTOLITH_CLIENT_ASDF_CACHE"))
+                      (null (uiop:getenv "CL_SOURCE_REGISTRY"))
+                      (null (uiop:getenv "ASDF_OUTPUT_TRANSLATIONS")))
+                 "Nix child wrappers receive no nested registry or restoration markers"))
+  (with-test-fixture (':pseudo-terminals "trusted terminal client startup")
+    (test-fixture-call-with-terminal-input
+     *platform*
+     (lambda (input)
+       (let ((*standard-input* input))
+         (with-test-environment (("AUTOLITH_SESSION_STYLE" nil)
+                                ("AUTOLITH_AGENT_SANDBOX" nil))
+           (dolist (arguments '(nil ("resume") ("resume" "K-8vQ2mp")
+                                ("--fullscreen") ("--immutable")))
+             (test-assert
+              (main--launcher-client-command-p
+               (parse-command-line (main--top-level-command) arguments))
+              "ordinary and resume starts use the trusted terminal client"))
+           (dolist (arguments '(("models") ("auth") ("--pristine")
+                                ("--simulate-crash") ("--image" "example.png")
+                                ("--localgroup-handoff" "/tmp/handoff.sexp")))
+             (test-assert
+              (not (main--launcher-client-command-p
+                    (parse-command-line (main--top-level-command) arguments)))
+              "non-client commands stay on their ordinary launcher paths"))
+           (with-test-environment (("AUTOLITH_AGENT_SANDBOX" "active"))
+             (test-assert (not (main--client-session-p))
+                          "an already sandboxed agent never starts another launcher"))
+           (with-test-environment (("AUTOLITH_SESSION_STYLE" "direct"))
+             (test-assert (not (main--client-session-p))
+                          "explicit direct starts bypass the trusted client")))))))
+  (with-test-configuration (configuration)
+    (let ((failure (make-condition 'localgroup-error
+                                   :message "detached startup failed"
+                                   :operation ':spawn))
+          (*main-launcher-client-p* t))
+      (test-call-with-function-replacements
+       (list (list 'localgroup-handoff-spawn-fresh
+                   (lambda (&rest arguments)
+                     (declare (ignore arguments))
+                     (error failure))))
+       (lambda ()
+         (test-assert
+          (handler-case
+              (progn (main--spawn-client-session configuration) nil)
+            (localgroup-error (condition) (eq condition failure)))
+          "a trusted client rethrows failed spawn instead of running an agent")))))
+  nil)
+
 (-> test-localgroup-fresh-session-spawn () null)
 (defun test-localgroup-fresh-session-spawn ()
   "Test client-first spawn records, launch options, and start-failure cleanup."

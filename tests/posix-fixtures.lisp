@@ -209,19 +209,37 @@
   (declare (ignore platform))
   (sb-posix:termios-lflag (sb-posix:tcgetattr descriptor)))
 
+(defmethod test-fixture-call-with-terminal-input ((platform posix-platform) function)
+  "Provide a character stream over the fixture's private pseudo-terminal."
+  (test-fixture-call-with-pseudo-terminal
+   platform
+   (lambda (descriptor)
+     (let ((stream (posix-fixture--descriptor-stream (sb-posix:dup descriptor) ':input)))
+       (unwind-protect (funcall function stream)
+         (close stream))))))
+
 (defmethod test-fixture-run-terminal-command ((platform posix-platform) command)
-  "Run COMMAND under the host script utility's private pseudo-terminal."
+  "Run COMMAND on a private PTY whose input stays open until the child exits."
   (declare (ignore platform))
-  (multiple-value-bind (output diagnostics status)
-      (uiop:run-program
-       (if (uiop:os-macosx-p)
-           (append (list "/usr/bin/script" "-q" "/dev/null") command)
-           (list "script" "-q" "-e" "-c"
-                 (format nil "~{~A~^ ~}" (mapcar #'uiop:escape-sh-token command))
-                 "/dev/null"))
-       :input nil :output ':string :error-output ':output :ignore-error-status t)
-    (declare (ignore diagnostics))
-    (values output status)))
+  (let* ((wrapped
+           (if (uiop:os-macosx-p)
+               (append (list "/usr/bin/script" "-q" "-e" "/dev/null") command)
+               (list "script" "-q" "-e" "-c"
+                     (format nil "~{~A~^ ~}" (mapcar #'uiop:escape-sh-token command))
+                     "/dev/null")))
+         (process (sb-ext:run-program (first wrapped) (rest wrapped)
+                                     :search t :pty t :wait nil)))
+    (unwind-protect
+         (let ((output
+                 (with-output-to-string (output)
+                   (loop for character = (read-char (sb-ext:process-pty process) nil nil)
+                         while character do (write-char character output)))))
+           (sb-ext:process-wait process)
+           (values output (sb-ext:process-exit-code process)))
+      (when (sb-ext:process-alive-p process)
+        (ignore-errors (sb-ext:process-kill process 15)))
+      (ignore-errors (sb-ext:process-wait process))
+      (sb-ext:process-close process))))
 
 (defmethod test-fixture-terminal-echo-p ((platform posix-platform) descriptor)
   "Check the ECHO local flag."

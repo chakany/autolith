@@ -216,6 +216,11 @@
   (declare (ignore platform function))
   (win32-fixture--unavailable ':pseudo-terminals))
 
+(defmethod test-fixture-call-with-terminal-input ((platform win32-platform) function)
+  "Windows offers no descriptor-backed interactive terminal fixture."
+  (declare (ignore platform function))
+  (win32-fixture--unavailable ':pseudo-terminals))
+
 (defmethod test-fixture-terminal-input-mode ((platform win32-platform)
                                              descriptor)
   "Windows offers no pseudo-terminal the tests can drive through a descriptor."

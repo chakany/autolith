@@ -371,6 +371,9 @@ The terminal's original mode is restored on every exit."))
   (:documentation
    "Return DESCRIPTOR's terminal input mode as a comparable integer."))
 
+(defgeneric test-fixture-call-with-terminal-input (platform function)
+  (:documentation "Call FUNCTION with a private interactive character input stream."))
+
 (defgeneric test-fixture-run-terminal-command (platform command)
   (:documentation
    "Run COMMAND on a private pseudo-terminal and return its output and status."))

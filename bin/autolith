@@ -183,6 +183,20 @@ finish_launcher()
   fi
 }
 
+start_terminal_approval()
+{
+  if [[ -t 0 && -t 1 && -z "$approval_socket" ]]; then
+    mkdir -p -- "$state_home/autolith-launcher/approval" || return 64
+    chmod 700 "$state_home/autolith-launcher" \
+      "$state_home/autolith-launcher/approval" || return 64
+    approval_directory=$(mktemp -d \
+      "$state_home/autolith-launcher/approval/session.XXXXXX") || return 64
+    chmod 700 "$approval_directory" || return 64
+    approval_socket=$approval_directory/control.sock
+    export AUTOLITH_BROKER_APPROVAL_SOCKET=$approval_socket
+  fi
+}
+
 start_broker()
 {
   local attempt
@@ -201,16 +215,7 @@ start_broker()
   export AUTOLITH_BROKER_CAPABILITY
   AUTOLITH_BROKER_CAPABILITY=$(od -An -tx1 -N32 /dev/urandom | tr -d '[:space:]') || return 64
   [[ ${#AUTOLITH_BROKER_CAPABILITY} -eq 64 ]] || return 64
-  if [[ -t 0 && -t 1 ]]; then
-    mkdir -p -- "$state_home/autolith-launcher/approval" || return 64
-    chmod 700 "$state_home/autolith-launcher" \
-      "$state_home/autolith-launcher/approval" || return 64
-    approval_directory=$(mktemp -d \
-      "$state_home/autolith-launcher/approval/session.XXXXXX") || return 64
-    chmod 700 "$approval_directory" || return 64
-    approval_socket=$approval_directory/control.sock
-    export AUTOLITH_BROKER_APPROVAL_SOCKET=$approval_socket
-  fi
+  start_terminal_approval || return 64
   run_trusted_source --autolith-internal-broker "$broker_socket" \
     </dev/null >/dev/null 2>&1 &
   broker_pid=$!
@@ -232,6 +237,7 @@ start_broker()
 run_trusted_source()
 {
   local trusted_cache=$cache_home/autolith-launcher/trusted-source
+  local relay=()
 
   # Nix source timestamps are fixed, so a shared output path can retain FASLs
   # from an older package. Keep each immutable source closure's cache separate.
@@ -241,10 +247,16 @@ run_trusted_source()
 
   mkdir -p -- "$trusted_cache/asdf" || return 64
   chmod 700 "$cache_home/autolith-launcher" "$trusted_cache" || return 64
+  if [[ ${1:-} == --autolith-internal-client && -n "$approval_socket" ]]; then
+    relay=("$terminal_relay" "$approval_socket" --)
+  fi
   env -u AUTOLITH_PROJECT_SETUP -u ASDF_OUTPUT_TRANSLATIONS \
     -u CL_SOURCE_REGISTRY \
+    AUTOLITH_CLIENT_CACHE_HOME="$cache_home" \
+    AUTOLITH_CLIENT_ASDF_CACHE="${AUTOLITH_ASDF_CACHE:-}" \
     XDG_CACHE_HOME="$trusted_cache" \
     AUTOLITH_ASDF_CACHE="$trusted_cache/asdf" \
+    ${relay[@]+"${relay[@]}"} \
     "$sbcl_command" --script "$source_root/bin/autolith-active" "$@"
 }
 
@@ -438,7 +450,25 @@ offer_bootstrap()
 
 run_active()
 {
+  local client_status
+
   export AUTOLITH_SOURCE_ROOT="$source_root"
+  # Spawn detached sessions before entering the agent sandbox. The thin client
+  # loads tracked source only; each session's launcher owns its broker and sandbox.
+  if [[ -t 0 && -t 1 && ${AUTOLITH_AGENT_SANDBOX:-} != active &&
+        ${AUTOLITH_SESSION_STYLE:-} != direct ]]; then
+    if [[ ${AUTOLITH_AGENT_SANDBOX:-} != off ]]; then
+      start_terminal_approval || return 64
+      ensure_terminal_relay || return 64
+      export AUTOLITH_LAUNCHER_TERMINAL
+      AUTOLITH_LAUNCHER_TERMINAL=$(tty) || return 64
+    fi
+    run_trusted_source --autolith-internal-client "$@"
+    client_status=$?
+    if [[ "$client_status" -ne 125 ]]; then
+      return "$client_status"
+    fi
+  fi
   if [[ "$from_source_requested" == true ]]; then
     run_active_source "$@"
   elif active_image_valid; then

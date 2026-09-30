@@ -40,6 +40,14 @@ developers, but I consider correct for self-modifiability.
   so cannot be trusted to confine itself
 - The *active image* operates the session: input, provider turns, tools, and
   the live terminal region
+- Interactive session starts run a thin client from protected tracked source
+  before entering the agent sandbox. It launches a detached session whose own
+  stable launcher creates its broker and sandbox, then attaches the terminal.
+  A trusted PTY relay owns the client terminal and supplies its approval socket
+  to the detached session's broker.
+  The client never loads user init or private mutations and cannot fall back to
+  evaluating an agent outside confinement. Direct starts and handoff recipients
+  enter the agent through the ordinary sandboxed launcher path.
 - *Workers* handle search (the special fff worker) and =lisp.*= REPLs.
   They live in separate Lisp images and cannot directly modify the agent.
 - *Durable agent records* live under XDG folders for conversations, memories,

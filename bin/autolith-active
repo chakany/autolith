@@ -36,6 +36,9 @@
   (asdf:load-system :autolith)
   (let ((arguments (uiop:command-line-arguments)))
     (cond
+      ((and arguments
+            (string= (first arguments) "--autolith-internal-client"))
+       (uiop:symbol-call '#:autolith '#:main-launcher-client (rest arguments)))
       ((and (= (length arguments) 2)
             (string= (first arguments) "--autolith-internal-broker"))
        (funcall (symbol-function (find-symbol "BROKER-RUN" '#:autolith))

@@ -934,6 +934,7 @@ printf 'subprocess %s\\n' \"$*\" >> \"${AUTOLITH_TEST_EVENT_LOG:?}\"
      "#!/bin/sh
 set -eu
 case \" $* \" in
+  *\" --autolith-internal-client \"*) exit 125 ;;
   *\" --autolith-internal-broker \"*)
     printf 'BROKER %s\\n' \"$*\" >> \"$AUTOLITH_TEST_LOG\"
     previous=
@@ -3589,6 +3590,71 @@ esac
                    (not (find #\Return model))))
             models)
      "models emits one plain identifier per line"))
+  nil)
+
+(-> test-launcher-client-boundary () null)
+(defun test-launcher-client-boundary ()
+  "Test the stable launcher's interactive client entry and safe fallback statuses."
+  (with-test-fixture (':pseudo-terminals "stable launcher client process boundary")
+    (with-test-configuration (configuration)
+      (let* ((root (test-configuration-root configuration))
+             (source (asdf:system-source-directory :autolith))
+             (launcher (merge-pathnames "bin/autolith" root))
+             (runtime (merge-pathnames "runtime" root))
+             (state-home (platform-make-temporary-directory
+                          *platform* #P"/tmp/" "autolith-client.")))
+        (unwind-protect
+             (progn
+               (dolist (relative '("bin/autolith" "native/terminal-relay.c"
+                                   "script/launcher-cli.sh" "script/migrate-launcher-data"))
+                 (let ((target (merge-pathnames relative root)))
+                   (ensure-directories-exist target)
+                   (uiop:copy-file (merge-pathnames relative source) target)))
+               (release-script-tests--write-file
+                runtime
+                "#!/bin/sh
+case \" $* \" in
+  *\" --autolith-internal-client \"*)
+    printf 'CLIENT sandbox=%s\\n' \"${AUTOLITH_AGENT_SANDBOX:-}\"
+    exit \"$AUTOLITH_TEST_CLIENT_STATUS\"
+    ;;
+  *\" --version \"*) printf 'SBCL 2.6.6\\n'; exit 0 ;;
+esac
+printf 'AGENT sandbox=%s\\n' \"${AUTOLITH_AGENT_SANDBOX:-}\"
+")
+               (dolist (pathname (list runtime launcher))
+                 (release-script-tests--chmod "755" pathname))
+               (dolist (case '(("" "" 0 0 t nil)
+                               ("" "" 64 64 t nil)
+                               ("off" "" 0 0 t nil)
+                               ("off" "" 125 0 t t)
+                               ("off" "" 64 64 t nil)
+                               ("off" "direct" 0 0 nil t)
+                               ("active" "" 0 0 nil t)))
+                 (destructuring-bind
+                     (sandbox style client-status expected-status client-p agent-p) case
+                   (multiple-value-bind (output status)
+                       (test-fixture-run-terminal-command
+                        *platform*
+                        (list "env"
+                              (format nil "HOME=~A" (namestring root))
+                              (format nil "XDG_DATA_HOME=~A" (merge-pathnames "data/" root))
+                              (format nil "XDG_STATE_HOME=~A" (namestring state-home))
+                              (format nil "XDG_CONFIG_HOME=~A" (merge-pathnames "config/" root))
+                              (format nil "XDG_CACHE_HOME=~A" (merge-pathnames "cache/" root))
+                              (format nil "AUTOLITH_SBCL=~A" (namestring runtime))
+                              (format nil "AUTOLITH_AGENT_SANDBOX=~A" sandbox)
+                              (format nil "AUTOLITH_SESSION_STYLE=~A" style)
+                              (format nil "AUTOLITH_TEST_CLIENT_STATUS=~D" client-status)
+                              (namestring launcher) "--from-source"))
+                     (test-assert (= status expected-status)
+                                  (format nil "client status ~S: ~A" case output))
+                     (test-assert (eq (not (null (search "CLIENT sandbox=" output))) client-p)
+                                  (format nil "client selection ~S: ~A" case output))
+                     (test-assert (eq (not (null (search "AGENT sandbox=" output))) agent-p)
+                                  "only a declined client or explicit direct start runs the agent")))))
+          (platform-delete-directory-tree *platform* state-home
+                                          :validate t :if-does-not-exist ':ignore)))))
   nil)
 
 (-> test-release-scripts () null)
