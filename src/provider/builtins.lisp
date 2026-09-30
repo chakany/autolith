@@ -156,12 +156,16 @@
 
 ;; ChatGPT subscription metadata: https://github.com/openai/codex,
 ;; codex-rs/models-manager/models.json at 27969c0ae9c1ec23e359ff5133b4c36a8dd5b1ac.
+;; GPT-6.1 Sol metadata verified at 67727e7cf114cf3e1b71db368d74b24e32f6cb12.
 (register-provider
  "chatgpt"
  :description "ChatGPT Codex subscription"
  :family ':codex
  :protocol ':responses
- :models '((:name "gpt-6-astra"
+ :models '((:name "gpt-6.1-sol"
+            :context-window 272000
+            :reasoning-efforts ("low" "medium" "high" "xhigh" "max" "ultra"))
+           (:name "gpt-6-astra"
             :context-window 272000
             :reasoning-efforts ("low" "medium" "high" "xhigh" "max" "ultra"))
            (:name "gpt-6-sol"

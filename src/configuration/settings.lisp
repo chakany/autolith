@@ -268,8 +268,9 @@
 ;; Fast capability metadata from https://github.com/openai/codex at
 ;; 27969c0ae9c1ec23e359ff5133b4c36a8dd5b1ac for GPT-6 Sol and Luna, and
 ;; 287587c32c9cbc1e78edbf2aaae6a6d84f5b0c56 for GPT-5.6.
+;; GPT-6.1 Sol Fast support verified at 67727e7cf114cf3e1b71db368d74b24e32f6cb12.
 (defparameter *codex-fast-mode-models*
-  '("gpt-6-sol" "gpt-6-luna" "gpt-5.6-sol" "gpt-5.6-luna" "gpt-5.6-terra")
+  '("gpt-6.1-sol" "gpt-6-sol" "gpt-6-luna" "gpt-5.6-sol" "gpt-5.6-luna" "gpt-5.6-terra")
   "Codex model identifiers verified to support the Fast service tier.")
 
 ;; GPT window sizes read from the live Codex model catalog on 2026-07-19 and

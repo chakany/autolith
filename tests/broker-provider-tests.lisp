@@ -75,8 +75,7 @@
   "Test trusted provider selection, credential scope, and streamed output."
   (with-test-configuration (configuration)
     (let* ((registration (provider-registration-find "chatgpt"))
-           (model (provider-model-name
-                   (first (provider-registration-models registration))))
+           (model "gpt-6.1-sol")
            (payload
              (json-encode
               (json-object "model" model
