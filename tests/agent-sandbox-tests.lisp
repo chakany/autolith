@@ -566,3 +566,43 @@ command sandbox is offered, while outside it nothing changes."
           (test-assert (= loads (if (equal marker "active") 0 1))
                        "startup loads MCP configuration only outside the agent sandbox")))))
   nil)
+
+(-> test-agent-sandbox-terminal-control () null)
+(defun test-agent-sandbox-terminal-control ()
+  "Test a sandboxed process can activate and restore its private terminal."
+  (with-test-fixture (:pseudo-terminals "agent terminal mode inside the sandbox")
+    (let* ((source-root (asdf:system-source-directory :autolith))
+           (setup (merge-pathnames ".qlot/setup.lisp" source-root))
+           (probe
+             "(let ((terminal (make-instance 'clinedi:host-terminal
+                                             :input-file-descriptor 0
+                                             :input-stream *standard-input*
+                                             :output-stream *standard-output*)))
+                (assert (clinedi:terminal-capture-input-mode terminal))
+                (clinedi:terminal-start terminal)
+                (clinedi:terminal-stop terminal)
+                (write-line \"private terminal restored\"))")
+           (plan
+             (cl-exec-sandbox:sandbox-build-plan
+              (namestring sb-ext:*runtime-pathname*)
+              (list "--noinform" "--non-interactive"
+                    "--eval" "(require :asdf)"
+                    "--eval" (format nil "(load ~S)" (namestring setup))
+                    "--eval" "(asdf:load-system :clinedi/posix)"
+                    "--eval" probe)
+              :policy (cl-exec-sandbox:make-sandbox-policy
+                       :network ':enabled
+                       :filesystem-rules
+                       (list (cl-exec-sandbox:make-filesystem-rule
+                              :kind ':special :path ':root :access ':read)))
+              :working-directory source-root)))
+      (multiple-value-bind (output status)
+          (test-fixture-run-terminal-command
+           *platform*
+           (platform-agent-sandbox-command
+            *platform* plan :launcher-terminal #P"/dev/ttys999999"))
+        (test-assert (zerop status)
+                     (format nil "sandboxed terminal mode succeeds: ~A" output))
+        (test-assert (not (null (search "private terminal restored" output)))
+                     "the sandboxed terminal completes activation and restoration"))))
+  nil)

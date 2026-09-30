@@ -209,6 +209,20 @@
   (declare (ignore platform))
   (sb-posix:termios-lflag (sb-posix:tcgetattr descriptor)))
 
+(defmethod test-fixture-run-terminal-command ((platform posix-platform) command)
+  "Run COMMAND under the host script utility's private pseudo-terminal."
+  (declare (ignore platform))
+  (multiple-value-bind (output diagnostics status)
+      (uiop:run-program
+       (if (uiop:os-macosx-p)
+           (append (list "/usr/bin/script" "-q" "/dev/null") command)
+           (list "script" "-q" "-e" "-c"
+                 (format nil "~{~A~^ ~}" (mapcar #'uiop:escape-sh-token command))
+                 "/dev/null"))
+       :input nil :output ':string :error-output ':output :ignore-error-status t)
+    (declare (ignore diagnostics))
+    (values output status)))
+
 (defmethod test-fixture-terminal-echo-p ((platform posix-platform) descriptor)
   "Check the ECHO local flag."
   (logtest sb-posix:echo

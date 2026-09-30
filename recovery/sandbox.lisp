@@ -152,8 +152,11 @@ AGENT-SANDBOX-UNAVAILABLE when this host has no sandbox backend."
         (when (cl-exec-sandbox:sandbox-plan-cleanup-paths plan)
           (error 'agent-sandbox-unavailable
                  :message "The agent sandbox would need files the launcher cannot remove."))
-        (cons (uiop:native-namestring (cl-exec-sandbox:sandbox-plan-program plan))
-              (cl-exec-sandbox:sandbox-plan-arguments plan)))))
+        (platform-agent-sandbox-command
+         *platform* plan
+         :launcher-terminal
+         (when (uiop:getenv "AUTOLITH_LAUNCHER_TERMINAL")
+           (agent-sandbox--launcher-terminal))))))
 
 (serapeum:-> agent-sandbox-cache-home () pathname)
 (defun agent-sandbox-cache-home ()

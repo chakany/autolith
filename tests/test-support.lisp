@@ -371,5 +371,9 @@ The terminal's original mode is restored on every exit."))
   (:documentation
    "Return DESCRIPTOR's terminal input mode as a comparable integer."))
 
+(defgeneric test-fixture-run-terminal-command (platform command)
+  (:documentation
+   "Run COMMAND on a private pseudo-terminal and return its output and status."))
+
 (defgeneric test-fixture-terminal-echo-p (platform descriptor)
   (:documentation "Return true when DESCRIPTOR's terminal echoes its input."))

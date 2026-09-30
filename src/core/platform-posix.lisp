@@ -210,6 +210,31 @@
     (cl-exec-sandbox:make-filesystem-rule
      :kind ':path :path pathname :access ':deny)))
 
+(defmethod platform-agent-sandbox-command ((platform posix-platform) plan
+                                         &key launcher-terminal)
+  "Allow macOS terminal ioctls on the relay's PTY while denying the host PTY."
+  (let ((command (call-next-method)))
+    (if (and (uiop:os-macosx-p) launcher-terminal)
+        (let ((arguments (rest command)))
+          (unless (and (equal (first arguments) "-p")
+                       (stringp (second arguments)))
+            (error 'platform-error
+                   :message "The agent sandbox has no inline Seatbelt profile."
+                   :operation ':agent-sandbox-command
+                   :pathname launcher-terminal
+                   :reason ':failed))
+          (list* (first command)
+                 "-p"
+                 (concatenate
+                  'string (second arguments)
+                  (format nil
+                          "~%(allow file-ioctl (regex ~S))~%~
+                           (deny file-ioctl (literal ~S))~%"
+                          "^/dev/ttys[0-9]+$"
+                          (uiop:native-namestring launcher-terminal)))
+                 (nthcdr 2 arguments)))
+        command)))
+
 (-> posix--status (t) platform-file-status)
 (defun posix--status (stat)
   "Return the platform file status described by SB-POSIX STAT."

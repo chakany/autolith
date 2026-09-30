@@ -249,6 +249,20 @@ sandbox provides a private device tree."))
   (declare (ignore pathname))
   nil)
 
+(defgeneric platform-agent-sandbox-command (platform plan &key launcher-terminal)
+  (:documentation
+   "Return PLAN's command with host terminal controls for LAUNCHER-TERMINAL.
+
+The relayed agent may configure its private terminal, while the launcher's
+terminal remains inaccessible."))
+
+(defmethod platform-agent-sandbox-command ((platform platform) plan
+                                         &key launcher-terminal)
+  "Use the sandbox backend's command without additional host controls."
+  (declare (ignore launcher-terminal))
+  (cons (uiop:native-namestring (cl-exec-sandbox:sandbox-plan-program plan))
+        (cl-exec-sandbox:sandbox-plan-arguments plan)))
+
 (defgeneric platform-parse-namestring (platform string)
   (:documentation
    "Parse STRING, a pathname a user or configuration supplied, into a pathname.

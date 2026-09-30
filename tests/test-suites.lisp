@@ -424,6 +424,7 @@
   test-agent-sandbox-host-temporary-secret
   test-agent-sandbox-launcher-command
   test-agent-sandbox-awareness
+  test-agent-sandbox-terminal-control
   test-recovery-git-ignores-repository-commands)
 
 (define-test-suite recovery
